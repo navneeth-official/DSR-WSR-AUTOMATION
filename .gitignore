@@ -1,0 +1,32 @@
+# Secrets and local config
+.env
+.env.local
+.env.*.local
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Alembic
+alembic/versions/__pycache__/
+
+# Local sample / test data (do not push to GitHub)
+sample rovo response.txt
+sample*.txt
+*rovo*response*.txt
+*.json.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
