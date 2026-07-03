@@ -8,6 +8,8 @@ from sqlalchemy import engine_from_config, pool
 from app.config import get_settings
 from app.database import Base
 from app.models.jira_story import JiraStory  # noqa: F401 — register model metadata
+from app.models.project import Project  # noqa: F401
+from app.models.sprint import Sprint  # noqa: F401
 
 config = context.config
 settings = get_settings()

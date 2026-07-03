@@ -17,10 +17,15 @@ PostgreSQL database and Python tooling to store Jira story data from **Rovo AI**
 │   ├── init_db.py          # Create PostgreSQL database
 │   ├── seed_from_rovo.py   # Import Rovo JSON into jira_stories
 │   └── check_schema.py     # Verify table/columns exist
+├── docker-compose.yml    # Local / EC2 PostgreSQL in Docker
+├── docs/
+│   └── AWS_DEPLOYMENT.md # Host on AWS for team access
 ├── sql/schema.sql          # Reference schema (managed by Alembic)
 ├── requirements.txt
-├── .env.example            # Environment variable template
-└── .env                    # Your local credentials (not committed to Git)
+├── .env.example            # Local PostgreSQL template
+├── .env.docker.example     # Docker Postgres template
+├── .env.aws.example        # AWS RDS / remote host template
+└── .env                    # Your credentials (not committed to Git)
 ```
 
 ## 1. Clone and set up Python
@@ -99,7 +104,31 @@ Re-running the import **updates** existing rows by `jira_key` (upsert).
 python scripts/check_schema.py
 ```
 
-You should see **22 columns**, indexes present, and Alembic at head (`002_rovo_fields_and_title`).
+You should see **3 tables** (`projects`, `sprints`, `jira_stories`), indexes present, and Alembic at head (`006_fix_jira_stories_pkey_name`).
+
+## Docker (local PostgreSQL without installing Postgres)
+
+```powershell
+copy .env.docker.example .env.docker
+# Edit POSTGRES_PASSWORD in .env.docker
+
+docker compose --env-file .env.docker up -d
+copy .env.docker.example .env
+python -m alembic upgrade head
+```
+
+See `docs/AWS_DEPLOYMENT.md` for full Docker + AWS instructions.
+
+## Host on AWS for coworkers
+
+Share one database so the team sees the same Jira story data.
+
+1. **Recommended:** Create **AWS RDS PostgreSQL** (or run **Docker on EC2**).
+2. Run migrations once: `python scripts/bootstrap_remote_db.py --seed-reference`
+3. Share connection details securely (not Git) — see `.env.aws.example`.
+4. Each coworker copies `.env.aws.example` → `.env` and connects via pgAdmin.
+
+Full step-by-step: **[docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md)**
 
 ### Option B — pgAdmin 4
 
@@ -118,36 +147,59 @@ FROM information_schema.columns
 WHERE table_name = 'jira_stories'
 ORDER BY ordinal_position;
 
-SELECT jira_key, project_name, summary, title, status
-FROM jira_stories
-ORDER BY jira_key;
+SELECT js.jira_key, p.project_name, js.summary, js.title, js.status
+FROM jira_stories js
+JOIN projects p ON p.project_id = js.project_id
+ORDER BY js.jira_key;
 ```
 
 ## Database schema
 
-The `jira_stories` table stores all Rovo JSON fields plus extra columns:
+Data is split across **3 normalized tables** to avoid duplication and enable fast filtering by numeric IDs:
 
-| Column | Source |
-|--------|--------|
-| `jira_key` | Rovo — primary key |
-| `project_key`, `project_name` | Rovo |
-| `sprint_name`, `sprint_start_date`, `sprint_end_date` | Rovo |
-| `summary`, `description` | Rovo |
-| `issue_type`, `priority` | Rovo |
-| `assignee`, `reporter`, `status` | Rovo |
-| `story_points` | Rovo |
-| `created_date`, `updated_date`, `resolved_date`, `snapshot_date` | Rovo |
-| `title` | Reserved for AI team (empty on import) |
-| `completion` | Inferred from status (e.g. Done → 100%) |
-| `created_at`, `updated_at` | Database audit timestamps |
+| Table | Key columns | Purpose |
+|-------|-------------|---------|
+| `projects` | `project_id` (PK), `project_key`, `project_name` | One row per Jira project |
+| `sprints` | `sprint_id` (PK), `sprint_name`, sprint dates | One row per unique sprint name |
+| `jira_stories` | `jira_key` (PK), `project_id` (FK), `sprint_id` (FK), story fields | Story details — references project/sprint by ID |
 
-Full reference: `sql/schema.sql`
+**Filter examples (using your project and sprint names):**
+
+```sql
+-- All LOCO stories
+SELECT js.jira_key, js.summary, js.status, s.sprint_name
+FROM jira_stories js
+JOIN projects p ON p.project_id = js.project_id
+LEFT JOIN sprints s ON s.sprint_id = js.sprint_id
+WHERE p.project_name = 'LOCO';
+
+-- Stories in sprint "Q2.13FY26 Eridanus"
+SELECT js.jira_key, p.project_name, js.summary, js.status
+FROM jira_stories js
+JOIN projects p ON p.project_id = js.project_id
+JOIN sprints s ON s.sprint_id = js.sprint_id
+WHERE s.sprint_name = 'Q2.13FY26 Eridanus';
+
+-- Fast filter by numeric ids (after you know them)
+SELECT * FROM jira_stories WHERE project_id = 3 AND sprint_id = 2;
+```
+
+**Your projects:** LOCO, Cost Core Service, GSS, Wentforth, Pharamacy, Supplier QA, SPUR, Pricing  
+**Example sprint names:** `Nacogdoches - 248`, `Q2.13FY26 Eridanus`, `Q2.14 FY26 Fornax`
+
+Optional: pre-seed project rows with `sql/reference_data.sql` before importing Rovo JSON.
+
+Story columns from Rovo: `summary`, `description`, `issue_type`, `priority`, `assignee`, `reporter`, `status`, `story_points`, dates, plus `title` (AI team) and `completion` (inferred from status).
+
+Full reference: `sql/schema.sql` · ER diagram: `sql/erd.md`
 
 ## Common commands
 
 | Task | Command |
 |------|---------|
 | Create database | `python scripts/init_db.py` |
+| Bootstrap AWS / remote DB | `python scripts/bootstrap_remote_db.py --seed-reference` |
+| Start local Docker Postgres | `docker compose --env-file .env.docker up -d` |
 | Apply migrations | `python -m alembic upgrade head` |
 | Import Rovo JSON | `python scripts/seed_from_rovo.py <file>` |
 | Verify schema | `python scripts/check_schema.py` |
@@ -175,6 +227,7 @@ Full reference: `sql/schema.sql`
 These are listed in `.gitignore`:
 
 - `.env` (real credentials)
+- `.env.docker`, `.env.aws`
 - `.venv/`
 - `sample rovo response.txt` (local sample data)
 

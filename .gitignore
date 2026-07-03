@@ -1,6 +1,8 @@
 # Secrets and local config
 .env
 .env.local
+.env.docker
+.env.aws
 .env.*.local
 
 # Virtual environments

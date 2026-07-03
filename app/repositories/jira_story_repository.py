@@ -2,9 +2,12 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.jira_story import JiraStory
+from app.models.project import Project
+from app.repositories.project_repository import ProjectRepository
+from app.repositories.sprint_repository import SprintRepository
 
 
 class JiraStoryRepository:
@@ -12,29 +15,61 @@ class JiraStoryRepository:
 
     def __init__(self, db: Session) -> None:
         self.db = db
+        self._projects = ProjectRepository(db)
+        self._sprints = SprintRepository(db)
 
     def get_by_key(self, jira_key: str) -> JiraStory | None:
-        return self.db.get(JiraStory, jira_key)
+        stmt = (
+            select(JiraStory)
+            .options(joinedload(JiraStory.project), joinedload(JiraStory.sprint))
+            .where(JiraStory.jira_key == jira_key)
+        )
+        return self.db.scalars(stmt).first()
 
     def get_all(self) -> list[JiraStory]:
-        stmt = select(JiraStory).order_by(JiraStory.created_date.desc())
-        return list(self.db.scalars(stmt).all())
+        stmt = (
+            select(JiraStory)
+            .options(joinedload(JiraStory.project), joinedload(JiraStory.sprint))
+            .order_by(JiraStory.created_date.desc())
+        )
+        return list(self.db.scalars(stmt).unique().all())
+
+    def get_by_project_id(self, project_id: int) -> list[JiraStory]:
+        stmt = (
+            select(JiraStory)
+            .options(joinedload(JiraStory.project), joinedload(JiraStory.sprint))
+            .where(JiraStory.project_id == project_id)
+            .order_by(JiraStory.created_date.desc())
+        )
+        return list(self.db.scalars(stmt).unique().all())
+
+    def get_by_project_key(self, project_key: str) -> list[JiraStory]:
+        stmt = (
+            select(JiraStory)
+            .join(Project)
+            .options(joinedload(JiraStory.project), joinedload(JiraStory.sprint))
+            .where(Project.project_key == project_key)
+            .order_by(JiraStory.created_date.desc())
+        )
+        return list(self.db.scalars(stmt).unique().all())
+
+    def get_by_sprint_id(self, sprint_id: int) -> list[JiraStory]:
+        stmt = (
+            select(JiraStory)
+            .options(joinedload(JiraStory.project), joinedload(JiraStory.sprint))
+            .where(JiraStory.sprint_id == sprint_id)
+            .order_by(JiraStory.jira_key)
+        )
+        return list(self.db.scalars(stmt).unique().all())
 
     def get_by_assignee(self, assignee: str) -> list[JiraStory]:
         stmt = (
             select(JiraStory)
+            .options(joinedload(JiraStory.project), joinedload(JiraStory.sprint))
             .where(JiraStory.assignee == assignee)
             .order_by(JiraStory.created_date.desc())
         )
-        return list(self.db.scalars(stmt).all())
-
-    def get_by_sprint(self, sprint_name: str) -> list[JiraStory]:
-        stmt = (
-            select(JiraStory)
-            .where(JiraStory.sprint_name == sprint_name)
-            .order_by(JiraStory.jira_key)
-        )
-        return list(self.db.scalars(stmt).all())
+        return list(self.db.scalars(stmt).unique().all())
 
     def upsert(
         self,
@@ -61,16 +96,23 @@ class JiraStoryRepository:
         completion: Decimal | float | int | None = None,
     ) -> JiraStory:
         """Insert a new story or update an existing one by jira_key."""
-        story = self.get_by_key(jira_key)
+        project = self._projects.get_or_create(
+            project_key=project_key,
+            project_name=project_name,
+        )
+        sprint = self._sprints.get_or_create(
+            sprint_name=sprint_name,
+            sprint_start_date=sprint_start_date,
+            sprint_end_date=sprint_end_date,
+        )
+
+        story = self.db.get(JiraStory, jira_key)
 
         if story is None:
             story = JiraStory(
                 jira_key=jira_key,
-                project_key=project_key,
-                project_name=project_name,
-                sprint_name=sprint_name,
-                sprint_start_date=sprint_start_date,
-                sprint_end_date=sprint_end_date,
+                project_id=project.project_id,
+                sprint_id=sprint.sprint_id if sprint else None,
                 summary=summary,
                 description=description,
                 issue_type=issue_type,
@@ -88,11 +130,8 @@ class JiraStoryRepository:
             )
             self.db.add(story)
         else:
-            story.project_key = project_key
-            story.project_name = project_name
-            story.sprint_name = sprint_name
-            story.sprint_start_date = sprint_start_date
-            story.sprint_end_date = sprint_end_date
+            story.project_id = project.project_id
+            story.sprint_id = sprint.sprint_id if sprint else None
             story.summary = summary
             story.description = description
             story.issue_type = issue_type
@@ -114,7 +153,7 @@ class JiraStoryRepository:
         return story
 
     def delete(self, jira_key: str) -> bool:
-        story = self.get_by_key(jira_key)
+        story = self.db.get(JiraStory, jira_key)
         if story is None:
             return False
         self.db.delete(story)
