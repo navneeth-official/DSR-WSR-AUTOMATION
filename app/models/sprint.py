@@ -18,6 +18,12 @@ class Sprint(Base):
 
     sprint_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     sprint_name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    sprint_status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        server_default="inprogress",
+        index=True,
+    )
     sprint_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     sprint_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 

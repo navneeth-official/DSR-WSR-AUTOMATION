@@ -40,6 +40,7 @@ class SprintRepository:
         if sprint is None:
             sprint = Sprint(
                 sprint_name=name,
+                sprint_status="inprogress",
                 sprint_start_date=sprint_start_date,
                 sprint_end_date=sprint_end_date,
             )

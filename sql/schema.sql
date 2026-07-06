@@ -14,6 +14,7 @@ CREATE INDEX IF NOT EXISTS ix_projects_project_key ON projects (project_key);
 CREATE TABLE IF NOT EXISTS sprints (
     sprint_id           SERIAL        PRIMARY KEY,
     sprint_name         VARCHAR(200)  NOT NULL UNIQUE,
+    sprint_status       VARCHAR(50)   NOT NULL DEFAULT 'inprogress',
     sprint_start_date   DATE,
     sprint_end_date     DATE,
     created_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS sprints (
 );
 
 CREATE INDEX IF NOT EXISTS ix_sprints_sprint_name ON sprints (sprint_name);
+CREATE INDEX IF NOT EXISTS ix_sprints_sprint_status ON sprints (sprint_status);
 
 CREATE TABLE IF NOT EXISTS jira_stories (
     jira_key            VARCHAR(50)   PRIMARY KEY,

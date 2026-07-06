@@ -44,6 +44,7 @@ PROJECT_COLUMNS = [
 SPRINT_COLUMNS = [
     ("sprint_id", "integer", "NO"),
     ("sprint_name", "character varying", "NO"),
+    ("sprint_status", "character varying", "NO"),
     ("sprint_start_date", "date", "YES"),
     ("sprint_end_date", "date", "YES"),
     ("created_at", "timestamp with time zone", "NO"),
@@ -65,12 +66,13 @@ EXPECTED_INDEXES = {
     },
     "sprints": {
         "ix_sprints_sprint_name",
+        "ix_sprints_sprint_status",
         "sprints_pkey",
         "uq_sprints_sprint_name",
     },
 }
 
-HEAD_REVISION = "006_fix_jira_stories_pkey_name"
+HEAD_REVISION = "007_add_sprint_status"
 
 
 def fetch_columns(cur, table_name: str) -> list[tuple[str, str, str]]:
