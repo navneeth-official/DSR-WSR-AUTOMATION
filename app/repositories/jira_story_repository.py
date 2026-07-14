@@ -1,11 +1,12 @@
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.jira_story import JiraStory
 from app.models.project import Project
+from app.models.sprint import Sprint
 from app.repositories.project_repository import ProjectRepository
 from app.repositories.sprint_repository import SprintRepository
 
@@ -71,6 +72,52 @@ class JiraStoryRepository:
         )
         return list(self.db.scalars(stmt).unique().all())
 
+    def get_latest_snapshot_date(self) -> date | None:
+        """Return the most recent snapshot_date in jira_stories, if any."""
+        stmt = select(func.max(JiraStory.snapshot_date))
+        return self.db.scalar(stmt)
+
+    def get_by_snapshot_date(self, snapshot_date: date) -> list[JiraStory]:
+        """Stories for a WSR snapshot week with project and sprint loaded."""
+        stmt = (
+            select(JiraStory)
+            .options(joinedload(JiraStory.project), joinedload(JiraStory.sprint))
+            .where(JiraStory.snapshot_date == snapshot_date)
+            .order_by(
+                JiraStory.project_id,
+                JiraStory.sprint_id,
+                JiraStory.jira_key,
+            )
+        )
+        return list(self.db.scalars(stmt).unique().all())
+
+    def get_for_wsr_date_range(
+        self, start_date: date, end_date: date
+    ) -> list[JiraStory]:
+        """
+        Stories for WSR: all stories on sprints whose start or end date
+        falls within the report range (inclusive).
+        """
+        def _in_range(col):
+            return and_(col.is_not(None), col >= start_date, col <= end_date)
+
+        sprint_eligible = or_(
+            _in_range(Sprint.sprint_start_date),
+            _in_range(Sprint.sprint_end_date),
+        )
+        stmt = (
+            select(JiraStory)
+            .join(Sprint, JiraStory.sprint_id == Sprint.sprint_id)
+            .options(joinedload(JiraStory.project), joinedload(JiraStory.sprint))
+            .where(sprint_eligible)
+            .order_by(
+                JiraStory.project_id,
+                JiraStory.sprint_id,
+                JiraStory.jira_key,
+            )
+        )
+        return list(self.db.scalars(stmt).unique().all())
+
     def upsert(
         self,
         *,
@@ -130,6 +177,8 @@ class JiraStoryRepository:
             )
             self.db.add(story)
         else:
+            summary_changed = story.summary != summary
+            description_changed = story.description != description
             story.project_id = project.project_id
             story.sprint_id = sprint.sprint_id if sprint else None
             story.summary = summary
@@ -144,7 +193,10 @@ class JiraStoryRepository:
             story.updated_date = updated_date
             story.resolved_date = resolved_date
             story.snapshot_date = snapshot_date
-            if title is not None:
+            # Clear title when source text changes so GPT regenerates on next PPT run.
+            if summary_changed or description_changed:
+                story.title = None
+            elif title is not None:
                 story.title = title
             story.completion = _to_decimal(completion)
 

@@ -21,7 +21,21 @@ __pycache__/
 # Alembic
 alembic/versions/__pycache__/
 
-# Local sample / test data (do not push to GitHub)
+# Generated PPT pipeline outputs (keep folder via .gitkeep)
+output/*
+!output/.gitkeep
+
+# Stray generated decks at repo root
+HEB_Delivery_Status*.pptx
+ppt_content.json
+ppt_content_preview.txt
+*.format_eval.json
+*.format_eval.txt
+*.hybrid_loop.json
+*.vision_loop.json
+*.layout_hints.json
+layout_geometry_debug.log
+
 sample rovo response.txt
 sample*.txt
 *rovo*response*.txt

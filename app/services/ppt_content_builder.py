@@ -1,0 +1,199 @@
+"""Build structured PPT slide content from jira_stories + projects + sprints."""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import date
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.constants.ppt_mapping import (
+    PPT_SLIDE_ORDER,
+    PPT_SLIDE_TITLES,
+    STATUS_TO_BUCKET,
+)
+from app.models.jira_story import JiraStory
+from app.repositories.jira_story_repository import JiraStoryRepository
+from app.services.title_generator import ensure_story_titles
+
+
+def ppt_slide_title(project_key: str, project_name: str) -> str:
+    return PPT_SLIDE_TITLES.get(project_key, project_name)
+
+
+def _format_sprint_dates(start: date | None, end: date | None) -> str:
+    if start and end:
+        return f"{start.strftime('%b %d')} \u2013 {end.strftime('%b %d')}"
+    if start:
+        return start.strftime("%b %d")
+    if end:
+        return end.strftime("%b %d")
+    return ""
+
+
+def _sprint_status_label(db_status: str | None) -> str:
+    """Use sprints.sprint_status as-is on the PPT sprint line (fallback when missing)."""
+    if not db_status or not db_status.strip():
+        return "In-progress"
+    return db_status.strip()
+
+
+def _bucket_story(status: str) -> str:
+    return STATUS_TO_BUCKET.get(status.strip().lower(), "completed")
+
+
+def _slide_order_key(project_key: str) -> tuple[int, str]:
+    try:
+        return (PPT_SLIDE_ORDER.index(project_key), project_key)
+    except ValueError:
+        return (len(PPT_SLIDE_ORDER), project_key)
+
+
+def build_slide_chunks(
+    stories: list[JiraStory],
+) -> list[dict[str, Any]]:
+    """Group stories by (project, sprint) and build one JSON chunk per group."""
+    groups: dict[tuple[int, int | None], list[JiraStory]] = defaultdict(list)
+    for story in stories:
+        groups[(story.project_id, story.sprint_id)].append(story)
+
+    chunks: list[dict[str, Any]] = []
+
+    for (project_id, sprint_id), group_stories in groups.items():
+        project = group_stories[0].project
+        sprint = group_stories[0].sprint
+        project_key = project.project_key
+        project_name = project.project_name
+
+        released: list[str] = []
+        inprogress: list[str] = []
+        completed: list[str] = []
+
+        for story in sorted(group_stories, key=lambda s: s.jira_key):
+            title = (story.title or story.summary).strip()
+            bucket = _bucket_story(story.status)
+            if bucket == "released":
+                released.append(title)
+            elif bucket == "inprogress":
+                inprogress.append(title)
+            else:
+                completed.append(title)
+
+        sprint_name = sprint.sprint_name if sprint else "Current Sprint"
+        sprint_dates = _format_sprint_dates(
+            sprint.sprint_start_date if sprint else None,
+            sprint.sprint_end_date if sprint else None,
+        )
+        status_word = _sprint_status_label(sprint.sprint_status if sprint else None)
+
+        chunks.append(
+            {
+                "project_key": project_key,
+                "project_name": project_name,
+                "title": ppt_slide_title(project_key, project_name),
+                "sprint_name": sprint_name,
+                "sprint_dates": sprint_dates,
+                "sprint_status": status_word,
+                "released": released,
+                "inprogress": inprogress,
+                "completed": completed,
+                "key_activities": [],
+            }
+        )
+
+    chunks.sort(
+        key=lambda c: (
+            _slide_order_key(c["project_key"]),
+            c["sprint_name"],
+        )
+    )
+    return chunks
+
+
+def group_chunks_by_slide_title(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Group (project, sprint) chunks that share the same PPT slide title.
+    Each sprint stays a separate section with its own sprint line (G10X Supplier pattern).
+    """
+    by_title: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+
+    for chunk in chunks:
+        title = chunk["title"]
+        section = {
+            "sprint_name": chunk["sprint_name"],
+            "sprint_dates": chunk["sprint_dates"],
+            "sprint_status": chunk["sprint_status"],
+            "released": list(chunk["released"]),
+            "inprogress": list(chunk["inprogress"]),
+            "completed": list(chunk["completed"]),
+        }
+        if title not in by_title:
+            by_title[title] = {
+                "project_key": chunk["project_key"],
+                "project_name": chunk["project_name"],
+                "title": title,
+                "sections": [],
+                "key_activities": chunk.get("key_activities", []),
+            }
+            order.append(title)
+        by_title[title]["sections"].append(section)
+
+    return [by_title[t] for t in order]
+
+
+# Backward-compatible alias
+merge_chunks_by_title = group_chunks_by_slide_title
+
+
+def build_ppt_content(
+    db: Session,
+    *,
+    start_date: date,
+    end_date: date,
+    save_titles: bool = False,
+    merge_titles: bool = True,
+    regenerate_titles: bool = False,
+) -> dict[str, Any]:
+    """
+    Full pipeline: fetch stories for WSR date range, ensure titles, return JSON.
+    """
+    if start_date > end_date:
+        raise ValueError(
+            f"start_date ({start_date}) must be on or before end_date ({end_date})."
+        )
+
+    repo = JiraStoryRepository(db)
+    stories = repo.get_for_wsr_date_range(start_date, end_date)
+    if not stories:
+        raise ValueError(
+            f"No stories found for report period {start_date} to {end_date}."
+        )
+
+    generated, reused = ensure_story_titles(
+        stories,
+        save=save_titles,
+        db=db,
+        regenerate=regenerate_titles,
+    )
+    if save_titles:
+        db.commit()
+
+    chunks = build_slide_chunks(stories)
+    if merge_titles:
+        slides = merge_chunks_by_title(chunks)
+    else:
+        slides = chunks
+
+    return {
+        "report_start_date": start_date.isoformat(),
+        "report_end_date": end_date.isoformat(),
+        "slides": slides,
+        "meta": {
+            "story_count": len(stories),
+            "slide_count": len(slides),
+            "titles_generated": generated,
+            "titles_reused": reused,
+        },
+    }
