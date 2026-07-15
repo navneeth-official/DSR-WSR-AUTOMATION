@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.sprint import Sprint
+from app.services.sprint_date_merge import merge_sprint_end_date, merge_sprint_start_date
 
 
 class SprintRepository:
@@ -47,10 +48,16 @@ class SprintRepository:
             self.db.add(sprint)
             self.db.flush()
         else:
-            if sprint_start_date and sprint.sprint_start_date is None:
-                sprint.sprint_start_date = sprint_start_date
-            if sprint_end_date and sprint.sprint_end_date is None:
-                sprint.sprint_end_date = sprint_end_date
+            # Widen the stored sprint window only — Rovo snapshots may carry
+            # WSR-clipped dates; never replace a longer canonical range.
+            if sprint_start_date is not None:
+                sprint.sprint_start_date = merge_sprint_start_date(
+                    sprint.sprint_start_date, sprint_start_date
+                )
+            if sprint_end_date is not None:
+                sprint.sprint_end_date = merge_sprint_end_date(
+                    sprint.sprint_end_date, sprint_end_date
+                )
             self.db.flush()
 
         return sprint

@@ -18,12 +18,18 @@ import json
 import os
 import re
 import shutil
+import sys
+from datetime import date
 from pathlib import Path
 from pptx import Presentation
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx.oxml.ns import qn
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO_ROOT))
+
+from app.services.sprint_display import sprint_dates_from_section
+
 G10X = str(_REPO_ROOT / "templates" / "G10X H-E-B WSR Sustainment 05 June 2026 .pptx")
 OUTPUT = str(_REPO_ROOT / "output" / "HEB_Delivery_Status.pptx")
 PHARMACY_CONTD_INDEX = 10
@@ -309,6 +315,18 @@ def _flatten_story_raw(raw):
     }
 
 
+def _sprint_dates_from_payload(payload: dict) -> str:
+    """Prefer ISO sprint bounds from JSON (DB source of truth)."""
+    return sprint_dates_from_section(payload)
+
+
+def _normalize_sprint_section(section: dict) -> dict:
+    """Ensure sprint_dates always matches sprint_start_date / sprint_end_date."""
+    normalized = dict(section)
+    normalized["sprint_dates"] = _sprint_dates_from_payload(section)
+    return normalized
+
+
 def load_slides_from_json(path):
     """Load slide chunks from ppt_content.json into the SLIDES dict shape."""
     with open(path, encoding="utf-8") as f:
@@ -321,11 +339,15 @@ def load_slides_from_json(path):
             "key_activities": chunk.get("key_activities", []),
         }
         if chunk.get("sections"):
-            entry["sections"] = chunk["sections"]
+            entry["sections"] = [
+                _normalize_sprint_section(s) for s in chunk["sections"]
+            ]
         else:
             entry.update({
                 "sprint_name": chunk["sprint_name"],
-                "sprint_dates": chunk["sprint_dates"],
+                "sprint_start_date": chunk.get("sprint_start_date"),
+                "sprint_end_date": chunk.get("sprint_end_date"),
+                "sprint_dates": _sprint_dates_from_payload(chunk),
                 "sprint_status": chunk.get("sprint_status", "In-progress"),
                 "released": chunk.get("released", []),
                 "inprogress": chunk.get("inprogress", []),
@@ -333,6 +355,52 @@ def load_slides_from_json(path):
             })
         slides[i] = entry
     return slides
+
+
+_ENGLISH_MONTHS = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+_COVER_DATE_TEXT_RE = re.compile(r"^\d{1,2}\s+\w+\s+\d{4}$")
+
+
+def format_wsr_cover_date(wsr_start: date) -> str:
+    """G10X cover slide format, e.g. ``05 June 2026``."""
+    return f"{wsr_start.day:02d} {_ENGLISH_MONTHS[wsr_start.month - 1]} {wsr_start.year}"
+
+
+def sync_cover_slide_wsr_date(prs, wsr_start: date | str) -> bool:
+    """
+    Set slide-1 WSR date from ``report_start_date`` (G10X ``Date Placeholder``).
+
+    Leaves the ``Weekly status report`` label unchanged; updates only the date line.
+    """
+    if isinstance(wsr_start, str):
+        wsr_start = date.fromisoformat(wsr_start)
+    formatted = format_wsr_cover_date(wsr_start)
+    cover = prs.slides[0]
+    for shape in cover.shapes:
+        if not shape.has_text_frame:
+            continue
+        text = shape.text_frame.text.strip()
+        if not text or text.lower() == "weekly status report":
+            continue
+        if _COVER_DATE_TEXT_RE.match(text) or (
+            "date" in shape.name.lower() and "weekly" not in text.lower()
+        ):
+            shape.text_frame.text = formatted
+            return True
+    return False
 
 
 def resolve_ka_items(raw):
@@ -409,6 +477,11 @@ def parse_args():
         "--layout-hints",
         default="",
         help="Path to layout hints JSON (pack_all_sections_on_main per service)",
+    )
+    parser.add_argument(
+        "--wsr-start-date",
+        default="",
+        help="WSR start date for cover slide (YYYY-MM-DD). Default: report_start_date from --content JSON",
     )
     return parser.parse_args()
 
@@ -3036,21 +3109,6 @@ def remove_unpopulated_delivery_slides(prs, populated_titles: set[str]) -> int:
     return removed
 
 
-def _clear_index_cell_entry(cell) -> bool:
-    """Blank the slide-number cell when the target slide was removed."""
-    changed = False
-    for paragraph in cell.text_frame.paragraphs:
-        if _is_index_number_paragraph(paragraph):
-            old = normalize_title_text("".join(run.text for run in paragraph.runs))
-            if old:
-                if paragraph.runs:
-                    paragraph.runs[0].text = ""
-                    for run in paragraph.runs[1:]:
-                        run.text = ""
-                changed = True
-    return changed
-
-
 def finalize_slide_order(prs):
     """Place each service's (Contd…) slide(s) immediately after its main delivery slide."""
     titles = [raw["title"] for raw in SLIDES.values()]
@@ -3187,13 +3245,77 @@ def _update_cell_index_entry(cell, index_slide, target_slide_idx, prs) -> bool:
     return changed
 
 
-def sync_index_slide_numbers(prs) -> int:
-    """
-    Synchronize Index slide numbers and hyperlinks with actual deck positions.
+def _index_table_cells_row_major(table):
+    """Return table cells in reading order (left-to-right, top-to-bottom)."""
+    cells = []
+    for row in table.rows:
+        cells.extend(row.cells)
+    return cells
 
-    G10X template index cells show original template slide numbers (e.g. 07 for
-    Pricing) but after removing unused slides the delivery deck uses consecutive
-    positions (e.g. Pricing on slide 5). Call after finalize_slide_order().
+
+def _cell_has_index_content(cell) -> bool:
+    """True when a table cell carries an index label (not just empty padding)."""
+    text = normalize_title_text(cell.text_frame.text)
+    if not text:
+        return False
+    cell_text = _cell_full_text(cell)
+    for needles, _search_title, _delivery_only in INDEX_ENTRY_RULES:
+        if all(n in cell_text for n in needles):
+            return True
+    for paragraph in cell.text_frame.paragraphs:
+        if _is_index_number_paragraph(paragraph):
+            return True
+    return False
+
+
+def _clear_index_cell_completely(cell) -> None:
+    """Remove all visible text and slide hyperlinks from an index cell."""
+    tx_body = cell.text_frame._txBody
+    for paragraph in cell.text_frame.paragraphs:
+        for run in paragraph.runs:
+            run.text = ""
+    for p_elem in tx_body.findall(qn("a:p")):
+        for hlink in list(p_elem.findall(qn("a:hlinkClick"))):
+            p_elem.remove(hlink)
+
+
+def _clone_cell_text_body(dst_cell, src_tx_body) -> None:
+    """Replace destination cell body with a deep copy of source ``a:txBody``."""
+    dst_tc = dst_cell._tc
+    old_tx = dst_tc.find(qn("a:txBody"))
+    if old_tx is not None:
+        dst_tc.remove(old_tx)
+    dst_tc.insert(0, copy.deepcopy(src_tx_body))
+
+
+def _collect_active_index_entries(prs, table) -> list[tuple[int, object]]:
+    """
+    Index entries that still resolve to a slide in the deck, in template order.
+
+    Returns ``(target_slide_idx, txBody_element)`` pairs. Skips removed projects
+    (e.g. LoCo with no delivery slide) and duplicate targets.
+    """
+    entries: list[tuple[int, object]] = []
+    seen_targets: set[int] = set()
+    for cell in _index_table_cells_row_major(table):
+        if not _cell_has_index_content(cell):
+            continue
+        cell_text = _cell_full_text(cell)
+        target_idx = _resolve_index_target_slide(prs, cell_text)
+        if target_idx is None or target_idx in seen_targets:
+            continue
+        seen_targets.add(target_idx)
+        entries.append((target_idx, copy.deepcopy(cell.text_frame._txBody)))
+    return entries
+
+
+def reflow_index_slide(prs) -> int:
+    """
+    Drop index rows for missing projects and compact remaining entries.
+
+    Projects without a delivery slide (or other mapped slide) are removed entirely
+    from the Index table — label and number — and surviving entries shift left/up
+    with no empty placeholder cells.
     """
     index_idx = _find_index_slide_index(prs)
     if index_idx is None:
@@ -3204,25 +3326,32 @@ def sync_index_slide_numbers(prs) -> int:
     if table is None:
         return 0
 
+    active_entries = _collect_active_index_entries(prs, table)
+    slot_cells = _index_table_cells_row_major(table)
+
+    for cell in slot_cells:
+        if _cell_has_index_content(cell):
+            _clear_index_cell_completely(cell)
+
     updated = 0
-    seen_targets: set[int] = set()
-    for row in table.rows:
-        for cell in row.cells:
-            cell_text = _cell_full_text(cell)
-            if not cell_text:
-                continue
-            target_idx = _resolve_index_target_slide(prs, cell_text)
-            if target_idx is None:
-                if _clear_index_cell_entry(cell):
-                    updated += 1
-                continue
-            if target_idx in seen_targets:
-                continue
-            if _update_cell_index_entry(cell, index_slide, target_idx, prs):
-                updated += 1
-            seen_targets.add(target_idx)
+    for slot_idx, (target_idx, tx_body) in enumerate(active_entries):
+        if slot_idx >= len(slot_cells):
+            break
+        cell = slot_cells[slot_idx]
+        _clone_cell_text_body(cell, tx_body)
+        if _update_cell_index_entry(cell, index_slide, target_idx, prs):
+            updated += 1
 
     return updated
+
+
+def sync_index_slide_numbers(prs) -> int:
+    """
+    Reflow the Index slide: remove missing projects and sync numbers/hyperlinks.
+
+    Call after ``finalize_slide_order()`` once unpopulated delivery slides are removed.
+    """
+    return reflow_index_slide(prs)
 
 
 def main():
@@ -3233,8 +3362,13 @@ def main():
 
     slides_data = SLIDES
     using_json = False
+    wsr_start_date = args.wsr_start_date.strip() or None
     if args.content and Path(args.content).is_file():
+        with open(args.content, encoding="utf-8") as f:
+            content_payload = json.load(f)
         slides_data = load_slides_from_json(args.content)
+        if not wsr_start_date:
+            wsr_start_date = content_payload.get("report_start_date")
         using_json = True
         print(f"Loaded {len(slides_data)} slide(s) from {args.content}")
 
@@ -3405,7 +3539,19 @@ def main():
     cleanup_orphan_contd_slides(prs)
     index_updates = sync_index_slide_numbers(prs)
     if index_updates:
-        print(f"Synced {index_updates} index entry/entries to actual slide numbers")
+        print(
+            f"Reflowed index slide: {index_updates} entr"
+            f"{'y' if index_updates == 1 else 'ies'} (removed projects without content)"
+        )
+
+    if wsr_start_date:
+        if sync_cover_slide_wsr_date(prs, wsr_start_date):
+            print(
+                f"Updated cover slide WSR date -> "
+                f"{format_wsr_cover_date(date.fromisoformat(wsr_start_date))}"
+            )
+        else:
+            print("Warning: cover slide date placeholder not found")
 
     out = deck_path
     try:

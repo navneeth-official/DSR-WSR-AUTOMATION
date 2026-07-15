@@ -1,57 +1,57 @@
-# Jira Automation — DSR/WSR Database
+# Jira Automation — WSR PowerPoint Pipeline
 
-PostgreSQL database and Python tooling to store Jira story data from **Rovo AI** for DSR/WSR reporting.
+Python tooling that stores Jira story data in PostgreSQL and builds **H-E-B Weekly Status Report (WSR)** PowerPoint decks from the G10X template.
+
+## How it works
+
+```
+Rovo AI JSON  →  PostgreSQL  →  ppt_content.json  →  HEB_Delivery_Status.pptx
+     (import)      (stories,        (slide text)         (G10X layout)
+                    sprints)
+```
+
+1. **Import** — Story data from Rovo AI is loaded into `projects`, `sprints`, and `jira_stories`.
+2. **Content build** — For a WSR date range you specify, the app selects qualifying sprints (overlap with the report window), groups stories by service/sprint, and writes `output/ppt_content.json`.
+3. **Deck build** — `update_delivery_status.py` copies the G10X template, fills Highlights / Key Activities, removes slides with no content, reflows the Index, and saves the `.pptx`.
+4. **Evaluation** (optional) — A separate step checks the deck against G10X spacing and layout rules (PASS/FAIL per slide).
+5. **Visual correction** (optional) — A separate command uses geometry + vision models to inspect and correct layout issues.
+
+**Key paths**
+
+| Path | Purpose |
+|------|---------|
+| `templates/G10X H-E-B WSR Sustainment 05 June 2026 .pptx` | G10X master template |
+| `output/ppt_content.json` | Generated slide content |
+| `output/ppt_content_preview.txt` | Human-readable preview |
+| `output/HEB_Delivery_Status.pptx` | Built deck (default) |
 
 ## Prerequisites
 
 - **Python 3.11+**
-- **PostgreSQL** installed and running (default port `5432`)
-- **pgAdmin 4** (optional, for visual DB inspection)
+- **PostgreSQL** (local, Docker, or AWS RDS)
+- **Azure OpenAI** (optional) — for AI story titles and vision-based layout review
 
-## Project structure
+---
 
-```
-├── app/                    # Application code (models, DB session, import service)
-├── alembic/                # Database migrations
-├── scripts/
-│   ├── init_db.py          # Create PostgreSQL database
-│   ├── seed_from_rovo.py   # Import Rovo JSON into jira_stories
-│   └── check_schema.py     # Verify table/columns exist
-├── docker-compose.yml    # Local / EC2 PostgreSQL in Docker
-├── docs/
-│   └── AWS_DEPLOYMENT.md # Host on AWS for team access
-├── sql/schema.sql          # Reference schema (managed by Alembic)
-├── requirements.txt
-├── .env.example            # Local PostgreSQL template
-├── .env.docker.example     # Docker Postgres template
-├── .env.aws.example        # AWS RDS / remote host template
-└── .env                    # Your credentials (not committed to Git)
-```
+## One-time setup
 
-## 1. Clone and set up Python
+### 1. Clone and install
 
 ```powershell
-cd "DSR WSR Automation DB"
+cd Jira-Automation
 
-# Create virtual environment
 py -3 -m venv .venv
-
-# Activate (PowerShell)
 .\.venv\Scripts\Activate.ps1
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-## 2. Configure environment variables
-
-Copy the example file and edit it with your PostgreSQL credentials:
+### 2. Configure environment
 
 ```powershell
 copy .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` with your database credentials:
 
 ```env
 DATABASE_URL=postgresql://postgres:your_password@localhost:5432/dsr_wsr_db
@@ -62,175 +62,174 @@ POSTGRES_PORT=5432
 POSTGRES_DB=dsr_wsr_db
 ```
 
-> **Password tip:** If your password contains `@`, URL-encode it in `DATABASE_URL` (e.g. `@` → `%40`).
+> If the password contains `@`, URL-encode it in `DATABASE_URL` (e.g. `@` → `%40`).
 
-## 3. Create the database
+For AI titles and vision evaluation, also set:
 
-This connects to PostgreSQL and creates `dsr_wsr_db` if it does not exist:
+```env
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=your-azure-key
+AZURE_OPENAI_API_VERSION=2024-02-15-preview
+AZURE_OPENAI_MODEL=gpt-4o-mini
+AZURE_OPENAI_VISION_MODEL=gpt-4o
+```
+
+### 3. Create database and tables
 
 ```powershell
 python scripts/init_db.py
-```
-
-## 4. Run migrations (create tables)
-
-Applies Alembic migrations and creates the `jira_stories` table:
-
-```powershell
 python -m alembic upgrade head
 ```
 
-## 5. Import Rovo AI data
-
-Point the seed script at a Rovo JSON file (array of story objects):
+### 4. Import Jira / Rovo data
 
 ```powershell
 python scripts/seed_from_rovo.py "path\to\rovo-response.json"
 ```
 
-Example with the local sample file (not in Git):
-
-```powershell
-python scripts/seed_from_rovo.py "sample rovo response.txt"
-```
-
-Re-running the import **updates** existing rows by `jira_key` (upsert).
-
-## 6. Verify the setup
-
-### Option A — Command line
+Re-running the import **upserts** rows by `jira_key`. Verify with:
 
 ```powershell
 python scripts/check_schema.py
 ```
 
-You should see **3 tables** (`projects`, `sprints`, `jira_stories`), indexes present, and Alembic at head (`006_fix_jira_stories_pkey_name`).
+**Docker alternative** — see `.env.docker.example` and `docker compose --env-file .env.docker up -d`. Remote/AWS setup: [docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md).
 
-## Docker (local PostgreSQL without installing Postgres)
+---
+
+## Running — Automation (build the deck)
+
+All commands assume the virtual environment is active and you are in the `Jira-Automation` folder.
+
+### Full pipeline (recommended)
+
+Reads PostgreSQL for the WSR date range, writes JSON + preview, and builds the PowerPoint:
 
 ```powershell
-copy .env.docker.example .env.docker
-# Edit POSTGRES_PASSWORD in .env.docker
-
-docker compose --env-file .env.docker up -d
-copy .env.docker.example .env
-python -m alembic upgrade head
+python scripts/generate_ppt_content.py --start-date 2026-04-16 --end-date 2026-06-15
 ```
 
-See `docs/AWS_DEPLOYMENT.md` for full Docker + AWS instructions.
+**Outputs:** `output/ppt_content.json`, `output/ppt_content_preview.txt`, `output/HEB_Delivery_Status.pptx`
 
-## Host on AWS for coworkers
+### JSON only (no PowerPoint)
 
-Share one database so the team sees the same Jira story data.
-
-1. **Recommended:** Create **AWS RDS PostgreSQL** (or run **Docker on EC2**).
-2. Run migrations once: `python scripts/bootstrap_remote_db.py --seed-reference`
-3. Share connection details securely (not Git) — see `.env.aws.example`.
-4. Each coworker copies `.env.aws.example` → `.env` and connects via pgAdmin.
-
-Full step-by-step: **[docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md)**
-
-### Option B — pgAdmin 4
-
-1. Connect to your PostgreSQL server.
-2. Open database **`dsr_wsr_db`**.
-3. Navigate to **Schemas → public → Tables → jira_stories**.
-4. Right-click → **View/Edit Data → All Rows** to see imported stories.
-
-Or run in **Query Tool**:
-
-```sql
-SELECT COUNT(*) FROM jira_stories;
-
-SELECT column_name, data_type
-FROM information_schema.columns
-WHERE table_name = 'jira_stories'
-ORDER BY ordinal_position;
-
-SELECT js.jira_key, p.project_name, js.summary, js.title, js.status
-FROM jira_stories js
-JOIN projects p ON p.project_id = js.project_id
-ORDER BY js.jira_key;
+```powershell
+python scripts/generate_ppt_content.py --start-date 2026-04-16 --end-date 2026-06-15 --json-only
 ```
 
-## Database schema
+### Build PowerPoint from existing JSON
 
-Data is split across **3 normalized tables** to avoid duplication and enable fast filtering by numeric IDs:
+If `ppt_content.json` already exists:
 
-| Table | Key columns | Purpose |
-|-------|-------------|---------|
-| `projects` | `project_id` (PK), `project_key`, `project_name` | One row per Jira project |
-| `sprints` | `sprint_id` (PK), `sprint_name`, sprint dates | One row per unique sprint name |
-| `jira_stories` | `jira_key` (PK), `project_id` (FK), `sprint_id` (FK), story fields | Story details — references project/sprint by ID |
-
-**Filter examples (using your project and sprint names):**
-
-```sql
--- All LOCO stories
-SELECT js.jira_key, js.summary, js.status, s.sprint_name
-FROM jira_stories js
-JOIN projects p ON p.project_id = js.project_id
-LEFT JOIN sprints s ON s.sprint_id = js.sprint_id
-WHERE p.project_name = 'LOCO';
-
--- Stories in sprint "Q2.13FY26 Eridanus"
-SELECT js.jira_key, p.project_name, js.summary, js.status
-FROM jira_stories js
-JOIN projects p ON p.project_id = js.project_id
-JOIN sprints s ON s.sprint_id = js.sprint_id
-WHERE s.sprint_name = 'Q2.13FY26 Eridanus';
-
--- Fast filter by numeric ids (after you know them)
-SELECT * FROM jira_stories WHERE project_id = 3 AND sprint_id = 2;
+```powershell
+python scripts/update_delivery_status.py --content output/ppt_content.json --output output/HEB_Delivery_Status.pptx
 ```
 
-**Your projects:** LOCO, Cost Core Service, GSS, Wentforth, Pharamacy, Supplier QA, SPUR, Pricing  
-**Example sprint names:** `Nacogdoches - 248`, `Q2.13FY26 Eridanus`, `Q2.14 FY26 Fornax`
+### Useful automation flags
 
-Optional: pre-seed project rows with `sql/reference_data.sql` before importing Rovo JSON.
+| Flag | Purpose |
+|------|---------|
+| `--save-titles` | Persist AI-generated story titles to the database |
+| `--regenerate-titles` | Force regeneration of titles via GPT |
+| `--ppt-output path.pptx` | Custom output deck path |
+| `--json-only` | Skip `.pptx` build |
 
-Story columns from Rovo: `summary`, `description`, `issue_type`, `priority`, `assignee`, `reporter`, `status`, `story_points`, dates, plus `title` (AI team) and `completion` (inferred from status).
+**WSR sprint selection** — Sprints whose duration **overlaps** the report range are included. Sprint dates shown on slides come from the `sprints` table (not clipped to the WSR window). Projects with no content are omitted from the deck and Index slide.
+
+---
+
+## Running — Evaluation (format check)
+
+Evaluation is **read-only** — it reports PASS/FAIL per slide; it does not modify the deck.
+
+### Deterministic rules only (no API)
+
+```powershell
+python scripts/evaluate_ppt_format.py --ppt output/HEB_Delivery_Status.pptx --mode deterministic
+```
+
+### Full evaluation (rules + AI rulebook)
+
+```powershell
+python scripts/evaluate_ppt_format.py --ppt output/HEB_Delivery_Status.pptx --mode full
+```
+
+### Include visual / vision review in evaluation
+
+```powershell
+python scripts/evaluate_ppt_format.py --ppt output/HEB_Delivery_Status.pptx --mode full --vision
+```
+
+**Reports** (saved by default under `output/`):
+
+- `HEB_Delivery_Status.format_eval.json`
+- `HEB_Delivery_Status.format_eval.txt`
+
+| Mode | What it checks |
+|------|----------------|
+| `deterministic` | Spacing, overlap, fonts, utilization — no API |
+| `ai` | AI rulebook review |
+| `vision` | Visual review via rendered slide images |
+| `full` | Deterministic + AI (`--vision` adds visual layer) |
+
+---
+
+## Running — Visual model correction (separate step)
+
+Use this **after** the deck is built when you want automated layout inspection and correction (geometry + qualitative vision). This is **not** part of the default build.
+
+```powershell
+python scripts/run_hybrid_validation_loop.py --ppt output/HEB_Delivery_Status.pptx
+```
+
+Rebuild from JSON and correct in one run:
+
+```powershell
+python scripts/run_hybrid_validation_loop.py --content output/ppt_content.json --output output/HEB_Delivery_Status_corrected.pptx
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--max-iterations 3` | Max correction loops (default: 3) |
+| `--keep-images` | Keep rendered slide PNGs |
+| `--geometry-only` | Geometry inspection only (no vision API) |
+| `--legacy-vision-measurement` | Legacy pixel-measurement loop |
+
+Requires `AZURE_OPENAI_*` in `.env` for vision steps. Close the `.pptx` in PowerPoint before running if you get a file-lock error.
+
+> **Note:** You can also trigger validation from the generate script with `--vision-validate`, but the dedicated command above is the recommended way to run visual correction on an existing deck.
+
+---
+
+## Database schema (summary)
+
+| Table | Purpose |
+|-------|---------|
+| `projects` | One row per Jira project |
+| `sprints` | Sprint name, start/end dates, status |
+| `jira_stories` | Story details; FK to project and sprint |
 
 Full reference: `sql/schema.sql` · ER diagram: `sql/erd.md`
 
-## Common commands
-
-| Task | Command |
-|------|---------|
-| Create database | `python scripts/init_db.py` |
-| Bootstrap AWS / remote DB | `python scripts/bootstrap_remote_db.py --seed-reference` |
-| Start local Docker Postgres | `docker compose --env-file .env.docker up -d` |
-| Apply migrations | `python -m alembic upgrade head` |
-| Import Rovo JSON | `python scripts/seed_from_rovo.py <file>` |
-| Verify schema | `python scripts/check_schema.py` |
-| Check migration status | `python -m alembic current` |
+---
 
 ## Troubleshooting
 
-**Connection refused**
-- Ensure PostgreSQL is running (Windows Services or pgAdmin connection test).
-
-**`database "dsr_wsr_db" does not exist`**
-- Run `python scripts/init_db.py`.
-
-**`column ... does not exist`**
-- Run `python -m alembic upgrade head`.
-
-**Alembic error with `%` in password**
-- URL-encode special characters in `DATABASE_URL` inside `.env`.
-
-**`psql` not found**
-- Use pgAdmin Query Tool or the Python scripts above; `psql` is not required.
+| Issue | Fix |
+|-------|-----|
+| Connection refused | Ensure PostgreSQL is running; check `.env` |
+| Database does not exist | `python scripts/init_db.py` |
+| Missing columns | `python -m alembic upgrade head` |
+| PermissionError on `.pptx` | Close PowerPoint or use a different `--output` path |
+| No stories for date range | Widen `--start-date` / `--end-date` or re-import Rovo data |
+| Vision / AI errors | Verify `AZURE_OPENAI_*` in `.env` |
 
 ## What not to commit
 
-These are listed in `.gitignore`:
-
-- `.env` (real credentials)
-- `.env.docker`, `.env.aws`
+- `.env` (credentials)
 - `.venv/`
-- `sample rovo response.txt` (local sample data)
+- Local sample Rovo files with real data
 
 ## License
 
-Internal HEB training project.
+Internal H-E-B training project.

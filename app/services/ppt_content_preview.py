@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.constants.ppt_bullets import CATEGORY_HEADER_PREVIEW_SYMBOL
+from app.services.sprint_display import sprint_dates_from_section
 
 
 def _sprint_line(section: dict[str, Any]) -> str:
@@ -14,9 +15,10 @@ def _sprint_line(section: dict[str, Any]) -> str:
         + len(section["completed"])
     )
     status = section.get("sprint_status", "In-progress")
+    sprint_dates = sprint_dates_from_section(section)
     return (
         f"Sprint – {section['sprint_name']}, {status} "
-        f"({section['sprint_dates']}) Stories "
+        f"({sprint_dates}) Stories "
         f"(Total – {total}, Done – {len(section['completed'])}, "
         f"In-review – {len(section['released'])}, "
         f"In-progress – {len(section['inprogress'])})"

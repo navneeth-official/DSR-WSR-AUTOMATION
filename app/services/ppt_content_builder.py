@@ -15,21 +15,12 @@ from app.constants.ppt_mapping import (
 )
 from app.models.jira_story import JiraStory
 from app.repositories.jira_story_repository import JiraStoryRepository
+from app.services.sprint_display import format_sprint_dates_for_display
 from app.services.title_generator import ensure_story_titles
 
 
 def ppt_slide_title(project_key: str, project_name: str) -> str:
     return PPT_SLIDE_TITLES.get(project_key, project_name)
-
-
-def _format_sprint_dates(start: date | None, end: date | None) -> str:
-    if start and end:
-        return f"{start.strftime('%b %d')} \u2013 {end.strftime('%b %d')}"
-    if start:
-        return start.strftime("%b %d")
-    if end:
-        return end.strftime("%b %d")
-    return ""
 
 
 def _sprint_status_label(db_status: str | None) -> str:
@@ -53,7 +44,12 @@ def _slide_order_key(project_key: str) -> tuple[int, str]:
 def build_slide_chunks(
     stories: list[JiraStory],
 ) -> list[dict[str, Any]]:
-    """Group stories by (project, sprint) and build one JSON chunk per group."""
+    """
+    Group stories by (project, sprint) and build one JSON chunk per group.
+
+    Sprint line dates always come from ``sprints.sprint_start_date`` /
+    ``sprints.sprint_end_date`` (full DB values). WSR range is not used here.
+    """
     groups: dict[tuple[int, int | None], list[JiraStory]] = defaultdict(list)
     for story in stories:
         groups[(story.project_id, story.sprint_id)].append(story)
@@ -81,10 +77,9 @@ def build_slide_chunks(
                 completed.append(title)
 
         sprint_name = sprint.sprint_name if sprint else "Current Sprint"
-        sprint_dates = _format_sprint_dates(
-            sprint.sprint_start_date if sprint else None,
-            sprint.sprint_end_date if sprint else None,
-        )
+        sprint_start = sprint.sprint_start_date if sprint else None
+        sprint_end = sprint.sprint_end_date if sprint else None
+        sprint_dates = format_sprint_dates_for_display(sprint_start, sprint_end)
         status_word = _sprint_status_label(sprint.sprint_status if sprint else None)
 
         chunks.append(
@@ -93,6 +88,8 @@ def build_slide_chunks(
                 "project_name": project_name,
                 "title": ppt_slide_title(project_key, project_name),
                 "sprint_name": sprint_name,
+                "sprint_start_date": sprint_start.isoformat() if sprint_start else None,
+                "sprint_end_date": sprint_end.isoformat() if sprint_end else None,
                 "sprint_dates": sprint_dates,
                 "sprint_status": status_word,
                 "released": released,
@@ -123,6 +120,8 @@ def group_chunks_by_slide_title(chunks: list[dict[str, Any]]) -> list[dict[str, 
         title = chunk["title"]
         section = {
             "sprint_name": chunk["sprint_name"],
+            "sprint_start_date": chunk.get("sprint_start_date"),
+            "sprint_end_date": chunk.get("sprint_end_date"),
             "sprint_dates": chunk["sprint_dates"],
             "sprint_status": chunk["sprint_status"],
             "released": list(chunk["released"]),
@@ -158,6 +157,10 @@ def build_ppt_content(
 ) -> dict[str, Any]:
     """
     Full pipeline: fetch stories for WSR date range, ensure titles, return JSON.
+
+    Sprint selection uses overlap against ``start_date``/``end_date`` (unchanged).
+    Sprint dates on each slide are the full ``sprints`` table values, never clipped
+    to the WSR window.
     """
     if start_date > end_date:
         raise ValueError(

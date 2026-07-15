@@ -1,7 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.jira_story import JiraStory
@@ -95,15 +95,16 @@ class JiraStoryRepository:
         self, start_date: date, end_date: date
     ) -> list[JiraStory]:
         """
-        Stories for WSR: all stories on sprints whose start or end date
-        falls within the report range (inclusive).
-        """
-        def _in_range(col):
-            return and_(col.is_not(None), col >= start_date, col <= end_date)
+        Stories for WSR: all stories on sprints whose duration overlaps the
+        report range (inclusive).
 
-        sprint_eligible = or_(
-            _in_range(Sprint.sprint_start_date),
-            _in_range(Sprint.sprint_end_date),
+        Overlap: sprint_start_date <= end_date AND sprint_end_date >= start_date
+        """
+        sprint_eligible = and_(
+            Sprint.sprint_start_date.is_not(None),
+            Sprint.sprint_end_date.is_not(None),
+            Sprint.sprint_start_date <= end_date,
+            Sprint.sprint_end_date >= start_date,
         )
         stmt = (
             select(JiraStory)
