@@ -25,11 +25,22 @@ def ensure_output_dir() -> Path:
     return OUTPUT_DIR
 
 
-def evaluation_report_paths(ppt_path: Path) -> tuple[Path, Path]:
-    """JSON + human-readable text report paths under output/ for a deck."""
+def evaluation_report_paths(ppt_path: Path) -> tuple[Path, Path, Path]:
+    """User JSON, user text, and internal debug JSON paths under output/."""
     ensure_output_dir()
     stem = Path(ppt_path).stem
     return (
         OUTPUT_DIR / f"{stem}.format_eval.json",
         OUTPUT_DIR / f"{stem}.format_eval.txt",
+        OUTPUT_DIR / f"{stem}.format_eval.internal.json",
+    )
+
+
+def evaluation_ai_report_paths(ppt_path: Path) -> tuple[Path, Path]:
+    """Visual AI review JSON + text paths under output/."""
+    ensure_output_dir()
+    stem = Path(ppt_path).stem
+    return (
+        OUTPUT_DIR / f"{stem}.format_eval.ai.json",
+        OUTPUT_DIR / f"{stem}.format_eval.ai.txt",
     )

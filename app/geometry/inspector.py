@@ -7,7 +7,7 @@ from pathlib import Path
 from app.geometry.metrics import enrich_slide_metrics
 from app.geometry.types import GeometryReport, GeometryViolation, SlideGeometryReport
 from app.services.ppt_format_extractor import extract_deck
-from app.services.ppt_format_violations import detect_slide_violations
+from app.services.ppt_format_violations import detect_deck_violations
 
 
 class GeometryInspector:
@@ -21,16 +21,21 @@ class GeometryInspector:
     def inspect(self, ppt_path: Path | str) -> GeometryReport:
         path = Path(ppt_path).resolve()
         deck = extract_deck(path)
+        deck_result = detect_deck_violations(deck, scope_all_slides=True)
+        violations_by_slide: dict[int, list[dict]] = {}
+        for violation in deck_result.get("violations") or []:
+            idx = violation.get("slide_index")
+            if idx is not None:
+                violations_by_slide.setdefault(int(idx), []).append(violation)
+
         slides: list[SlideGeometryReport] = []
-        total_violations = 0
-        critical_count = 0
+        total_violations = deck_result.get("violation_count", 0)
+        critical_count = deck_result.get("critical_count", 0)
 
         for slide_data in deck.get("slides") or []:
             idx = int(slide_data.get("slide_index") or 0)
-            raw_violations = detect_slide_violations(slide_data)
+            raw_violations = violations_by_slide.get(idx, [])
             violations = [GeometryViolation.from_dict(v) for v in raw_violations]
-            total_violations += len(violations)
-            critical_count += sum(1 for v in violations if v.severity == "critical")
 
             metrics = {
                 k: slide_data.get(k)

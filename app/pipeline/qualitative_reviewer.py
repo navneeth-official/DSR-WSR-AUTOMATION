@@ -5,9 +5,13 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from collections.abc import Callable
+
 from app.pipeline.types import RenderBatch, RenderedSlide
+from app.services.ppt_format_extractor import extract_deck
 from app.vision.qualitative_client import QualitativeVisionClient
 from app.vision.qualitative_types import QualitativeReviewReport, QualitativeSlideReview
+from app.vision.slide_context import build_vision_context_by_slide
 
 
 class QualitativeVisionReviewer:
@@ -16,7 +20,13 @@ class QualitativeVisionReviewer:
     def __init__(self, *, client: QualitativeVisionClient | None = None) -> None:
         self._client = client or QualitativeVisionClient()
 
-    def evaluate(self, render_batch: RenderBatch) -> QualitativeReviewReport:
+    def evaluate(
+        self,
+        render_batch: RenderBatch,
+        *,
+        slide_contexts: dict[int, dict] | None = None,
+        on_slide_start: Callable[[RenderedSlide, int, int], None] | None = None,
+    ) -> QualitativeReviewReport:
         if not render_batch.slides:
             return QualitativeReviewReport(
                 deck_pass=True,
@@ -24,15 +34,29 @@ class QualitativeVisionReviewer:
                 vision_model=self._client.model_name,
             )
 
+        contexts = slide_contexts
+        if contexts is None:
+            try:
+                deck = extract_deck(render_batch.ppt_path)
+                contexts = build_vision_context_by_slide(deck)
+            except Exception:  # noqa: BLE001
+                contexts = {}
+
         reexport_dir: list[Path | None] = [None]
         slide_reviews: list[QualitativeSlideReview] = []
+        total = len(render_batch.slides)
 
-        for slide in render_batch.slides:
+        for n, slide in enumerate(render_batch.slides, start=1):
+            if on_slide_start is not None:
+                on_slide_start(slide, n, total)
             image_path = self._resolve_slide_image(slide, render_batch, reexport_dir)
+            ctx = dict(contexts.get(slide.slide_index, {}))
+            ctx.setdefault("title", slide.title)
             review = self._client.review_slide(
                 image_path,
                 slide_number=slide.slide_index,
                 title=slide.title,
+                layout_context=ctx,
             )
             slide_reviews.append(review)
 

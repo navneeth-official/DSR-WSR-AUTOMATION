@@ -2,7 +2,7 @@
   "meta": {
     "template_name": "G10X H-E-B WSR Sustainment",
     "template_file": "G10X H-E-B WSR Sustainment 05 June 2026 .pptx",
-    "version": "1.1.0",
+    "version": "2.0.0",
     "reference_slides": {
       "canonical_style": {
         "index": 2,
@@ -18,18 +18,35 @@
     "slide_aspect_ratio": "16:9",
     "slide_size_inches": { "width": 13.333, "height": 7.5 },
     "scoring": {
+      "architecture": "hybrid",
       "scope": "entire_deck",
-      "scope_note": "Score every delivery-status slide in the deck, including G10X template placeholders not yet updated by automation.",
       "per_slide_scale": "0-100",
-      "deck_score_method": "average_of_all_delivery_status_slides",
-      "deck_pass_threshold": 80,
-      "category_weights": {
-        "typography": 0.2,
-        "bullet_hierarchy": 0.2,
-        "spacing": 0.2,
-        "layout_geometry": 0.15,
-        "content_structure": 0.15,
-        "space_utilization": 0.1
+      "deck_score_method": "weighted_average",
+      "deterministic_weight": 0.70,
+      "visual_weight": 0.30,
+      "deterministic_pass_threshold": 70,
+      "visual_pass_threshold": 70,
+      "critical_auto_fail": true,
+      "deterministic_categories": [
+        "overlap",
+        "clipping",
+        "overflow",
+        "footer_intrusion",
+        "alignment",
+        "geometry",
+        "spacing_metrics",
+        "utilization_metrics",
+        "typography"
+      ],
+      "visual_categories": {
+        "visual_balance": 0.30,
+        "readability": 0.25,
+        "whitespace_quality": 0.20,
+        "presentation_quality": 0.25
+      },
+      "legacy_ai_rulebook": {
+        "deprecated": true,
+        "note": "Mode 'ai' retained for backward compatibility only. Use hybrid full mode."
       }
     }
   },
@@ -176,15 +193,16 @@
       {
         "id": "HL-SPC-02",
         "name": "Story to story",
-        "description": "Single line spacing within a story list",
+        "description": "Single line spacing within a story list — template uses fixed 16pt line height (a:lnSpc/a:spcPts val=1600) for 12pt body text",
         "spc_bef_pt": 0,
-        "line_spacing_pct": 100
+        "line_spacing_pt": 16
       },
       {
         "id": "HL-SPC-03",
         "name": "Between sprint blocks",
-        "description": "Exactly one empty paragraph between end of one sprint and start of next",
-        "blank_lines": 1
+        "description": "Visual separation between sprint blocks — template uses 0–1 blank lines depending on content. Do NOT require a fixed blank-line count; only flag when sprint blocks appear merged or excessively separated.",
+        "evaluation": "visual_grouping",
+        "blank_lines_typical_range": [0, 1]
       },
       {
         "id": "HL-SPC-04",
@@ -195,20 +213,20 @@
     ],
     "space_utilization": {
       "id": "HL-UTIL-01",
-      "description": "Fill main slide to Supplier reference mark before creating (Contd...)",
-      "canonical_para_slots": 20,
-      "canonical_filled_paras": 19,
+      "description": "Deprecated for deterministic evaluation — use measured layout bands instead of main vs contd labels.",
+      "evaluation": "layout_measurement",
       "dense_fill_threshold": 0.85,
-      "min_utilization_before_contd": 0.85,
-      "effective_utilization_note": "Use max(paragraph_count, visual_line_count) / 20 — wrapped lines count toward fill",
-      "sparse_max_wasted_fraction": 0.35,
-      "notes": "If fewer than ~85% of slots are used and a (Contd...) slide exists, flag premature continuation"
+      "notes": "Deterministic rules use hl_waste_dense_fill_max_in and hl_waste_sparse_ka_max_in from template_layout_thresholds.json. Slide type (is_contd) must not change thresholds."
     },
     "sparse_sizing": {
       "id": "HL-SIZE-01",
-      "description": "When Highlights has few bullets (<85% fill), shrink the HL table to wrap-aware text height — do not stretch to full_main / expanded box with large empty area below text",
-      "max_waste_below_text_in": 0.5,
-      "notes": "Oversized sparse HL prevents KA from fitting on the same slide (see KA-PLC-04)"
+      "description": "Internal HL slack below last bullet (hl_waste_below_text_in). Dense-fill slides: up to ~0.12 in is normal padding. Sparse HL+KA slides may have up to ~1.05 in by design. Flag HL-SIZE-01 / CONT-SPARSE-01 only above calibrated bands in template_layout_thresholds.json.",
+      "evaluation": "visual_balance",
+      "hl_waste_below_text_typical_max_in": 0.1218,
+      "hl_waste_dense_fill_max_in": 0.1218,
+      "hl_waste_sparse_ka_max_in": 1.0488,
+      "thresholds_file": "app/constants/template_layout_thresholds.json",
+      "notes": "Overlap/clipping is HL-OVERFLOW-01 / KA-OVERLAP-01, not HL-SIZE-01"
     }
   },
   "key_activities": {
@@ -251,19 +269,19 @@
       },
       {
         "id": "KA-PLC-02",
-        "name": "HL to KA vertical gap",
-        "description": "When HL and KA on same slide: table-border gap should be ~0.05–0.15 in (borders may touch slightly). Judge using hl_ka_gap_in from extracted metrics — NOT fixed inch targets from any named reference slide.",
-        "target_gap_in": 0.15,
-        "max_gap_in": 0.28,
-        "min_gap_in": -0.12,
-        "text_clearance_min_in": 0.15,
-        "text_clearance_metric": "text_ka_clearance_in"
+        "name": "HL to KA tab spacing",
+        "description": "Spacing between HL table bottom border and KA header (hl_ka_gap_in — the double-arrow gap). Calibrated target 0.3111 in (~2 body lines). Flag when hl_ka_gap_in > 0.3311 in.",
+        "primary_metric": "hl_ka_gap_in",
+        "min_clearance_in": 0.15,
+        "target_border_gap_in": 0.3111,
+        "max_border_gap_in": 0.3311
       },
         {
           "id": "KA-PLC-03",
           "name": "KA-only contd slide",
-          "description": "When main slide is full of Highlights, KA may move to (Contd...) with no empty Highlights table",
-          "allowed_layout": "ka_contd_only"
+          "description": "When main slide is full of Highlights, KA may move to (Contd...) with no Highlights table. layout_type ka_only_contd is VALID — do NOT flag missing HL tab or HL-UTIL-01.",
+          "allowed_layout": "ka_contd_only",
+          "ai_must_not_flag": ["CONT-SPARSE-01", "missing HL tab"]
         },
         {
           "id": "KA-PLC-04",
@@ -288,20 +306,22 @@
       "violation_ids": ["HL-SIZE-01", "KA-SIZE-01", "CONT-SPARSE-01"]
     },
     "hl_ka_spacing": {
-      "description": "When HL and KA share a slide: stack HL header → HL content → mandatory text buffer (≥0.15 in) → KA header → KA content. Spacing is measured from the last rendered HL text line to the KA table top — NOT table-border to table-border. Gray box borders may touch (hl_ka_gap_in down to -0.12 in) but story text must never intrude into the KA header bar.",
-      "primary_rule": "text_ka_clearance_in >= min_text_clearance_in (builder uses _position_ka_below_hl_text)",
+      "description": "HL–KA tab spacing = hl_ka_gap_in (HL table bottom to KA header). Calibrated target 0.3111 in, max 0.3311 in. Minimum text_ka_clearance_in >= 0.15 in (no merge). Internal HL slack uses dense-fill vs sparse HL+KA bands (see template_layout_thresholds.json).",
+      "primary_rule": "hl_ka_gap_in <= 0.3311 in when key_activities present",
       "border_gap_metric": "hl_ka_gap_in",
       "text_clearance_metric": "text_ka_clearance_in",
-      "target_text_clearance_in": 0.15,
-      "min_border_gap_in": -0.12,
-      "max_border_gap_in": 0.28,
       "min_text_clearance_in": 0.15,
-      "violation_ids": ["KA-PLC-01", "KA-PLC-02", "KA-OVERLAP-01"]
+      "target_border_gap_in": 0.3111,
+      "max_border_gap_in": 0.3311,
+      "hl_waste_dense_fill_max_in": 0.1218,
+      "hl_waste_sparse_ka_max_in": 1.0488,
+      "violation_ids": ["KA-OVERLAP-01", "HL-OVERFLOW-01", "KA-PLC-02"]
     },
     "footer_boundary": {
       "max_bottom_in": 6.29,
-      "description": "No table bottom may extend below the footer safe zone. If HL + buffer + KA would exceed it, split to (Contd...).",
-      "violation_id": "GEO-02"
+      "description": "Footer rule applies to RENDERED TEXT, not table borders. Dense HL-only slides may extend the table toward the dotted line. Fail GEO-02 only when estimated_text_bottom_in or ka_rendered_text_bottom_in enters the footer zone.",
+      "violation_id": "GEO-02",
+      "content_metrics": ["estimated_text_bottom_in", "ka_rendered_text_bottom_in"]
     },
     "contd_decision_tree": [
       {
@@ -325,8 +345,8 @@
         "outcome": "HL (Contd...) slide"
       },
       {
-        "condition": "Main slide < 85% full but HL (Contd...) exists for same service",
-        "outcome": "Premature continuation (HL-UTIL-01)"
+        "condition": "layout_type ka_only_contd — HL finished on prior slide, only KA remains",
+        "outcome": "Valid — do NOT flag missing HL (KA-PLC-03)"
       },
       {
         "condition": "(Contd...) slide has few bullets in oversized HL box",
@@ -335,20 +355,25 @@
     ],
     "overlap_rules": {
       "text_to_ka": "Rendered HL text must not intrude into KA (text_ka_clearance_in >= 0.15 in)",
-      "border_to_ka": "HL table bottom to KA table top may touch slightly (hl_ka_gap_in >= -0.12 in)",
-      "violation_ids": ["KA-OVERLAP-01", "KA-PLC-01"]
+      "hl_text_inside_table": "HL text must not extend below the HL table border (hl_text_overflow_in == 0)",
+      "footer_content": "Rendered HL/KA text must not enter footer zone (estimated_text_bottom_in, ka_rendered_text_bottom_in <= 6.29 in)",
+      "violation_ids": ["KA-OVERLAP-01", "HL-OVERFLOW-01", "GEO-02"]
     },
     "metrics_the_ai_must_use": [
       "hl_waste_below_text_in",
+      "hl_text_overflow_in",
       "ka_waste_below_text_in",
+      "ka_rendered_text_bottom_in",
       "utilization_ratio",
       "effective_utilization_ratio",
       "visual_line_count",
       "filled_paragraph_count",
       "hl_ka_gap_in",
       "text_ka_clearance_in",
+      "estimated_text_bottom_in",
       "layout_type",
       "is_contd",
+      "key_activities",
       "highlights.position_in",
       "key_activities.position_in"
     ]
@@ -358,7 +383,7 @@
       "on_slide_ka": {
         "description": "Main slide with both Highlights and Key Activities when content fits in footer zone",
         "hl_sizing": "Sparse: shrink HL to text; dense: expand toward KA anchor",
-        "ka_placement": "Directly below HL with target border gap ~0.15 in"
+        "ka_placement": "Directly below HL with ~2 body lines between table borders (~0.31 in)"
       },
       "hl_only_main": {
         "description": "Main slide with only Highlights when HL is dense and KA moves to (Contd...)",
@@ -424,13 +449,16 @@
     ]
   },
   "repair_instructions": {
-    "for_model": "You are a G10X WSR delivery-status deck layout repair planner. Follow layout_principles (content-agnostic — never compare to named reference slides). Given extracted slide metrics and deterministic violations, return a FixPlan JSON with ONLY whitelisted actions. Prefer layout_repair and in-place geometry fixes before rebuild_with_hints. Map: HL-SIZE-01/KA-SIZE-01/KA-PLC-01/KA-PLC-02/KA-OVERLAP-01 → layout_repair; HL-UTIL-01 → rebuild_with_hints (pack_all_sections_on_main, suppress_hl_contd); KA-PLC-04 → layout_repair + rebuild if needed; TITLE-01 → fix_title_en_dash; HL-SPC-01 → remove_category_story_blanks; HL-SPC-03 → remove_extra_sprint_blanks; GEO-02 → layout_repair or rebuild.",
+    "for_model": "You are a G10X WSR delivery-status deck layout repair planner. Follow layout_principles (content-agnostic — never compare to named reference slides). Given extracted slide metrics and deterministic violations, return a FixPlan JSON with ONLY whitelisted actions. Prefer layout_repair and in-place geometry fixes before rebuild_with_hints. Map: HL-SIZE-01/KA-SIZE-01/CONT-SPARSE-01/KA-PLC-01/KA-PLC-02/KA-OVERLAP-01 → layout_repair; KA-PLC-04 → layout_repair + rebuild if needed; TITLE-01 → fix_title_en_dash; HL-SPC-01 → remove_category_story_blanks; HL-SPC-03 → remove_extra_sprint_blanks; GEO-02 → layout_repair or rebuild.",
     "thresholds": {
+      "source": "app/constants/template_layout_thresholds.json",
       "min_text_ka_clearance_in": 0.15,
       "utilization_threshold": 0.85,
       "sparse_contd_max_filled": 3,
-      "hl_ka_max_gap_in": 0.25,
-      "hl_ka_min_gap_in": -0.12,
+      "hl_ka_max_gap_in": 0.3311,
+      "hl_ka_target_gap_in": 0.3111,
+      "hl_waste_dense_fill_max_in": 0.1218,
+      "hl_waste_sparse_ka_max_in": 1.0488,
       "footer_max_bottom_in": 6.29,
       "max_waste_below_text_in": 0.5
     },
@@ -465,8 +493,85 @@
       }
     }
   },
+  "evaluation_architecture": {
+    "version": "2.0",
+    "principle": "Deterministic geometry is the source of truth. AI evaluates subjective visual quality only.",
+    "layers": {
+      "deterministic": {
+        "enforcement": "code_only",
+        "source": "ppt_format_extractor + ppt_format_violations",
+        "validates": [
+          "overlap",
+          "clipping",
+          "overflow",
+          "footer_intrusion",
+          "alignment",
+          "geometry",
+          "distance_metrics",
+          "utilization_metrics"
+        ],
+        "auto_fail_on_critical": true
+      },
+      "visual": {
+        "enforcement": "ai_visual_reviewer",
+        "source": "rendered PNG + layout_metrics context",
+        "validates": [
+          "visual_balance",
+          "readability",
+          "whitespace_quality",
+          "presentation_quality"
+        ],
+        "must_not_measure": [
+          "coordinates",
+          "distances",
+          "textbox_dimensions",
+          "overlaps",
+          "clipping",
+          "footer_violations"
+        ]
+      }
+    },
+    "rule_enforcement_tags": {
+      "deterministic": [
+        "TITLE-01",
+        "HL-P-04",
+        "HL-SPC-01",
+        "KA-OVERLAP-01",
+        "HL-OVERFLOW-01",
+        "HL-SIZE-01",
+        "KA-PLC-02",
+        "CONT-SPARSE-01",
+        "KA-SIZE-01",
+        "GEO-02",
+        "KA-PLC-04",
+        "HL-HDR-02",
+        "HL-P-01",
+        "HL-P-02",
+        "HL-P-03",
+        "HL-P-05",
+        "HL-SPC-02",
+        "HL-SPC-04"
+      ],
+      "visual_subjective": [
+        "VISUAL-BALANCE",
+        "VISUAL-READABILITY",
+        "VISUAL-WHITESPACE",
+        "VISUAL-PRESENTATION"
+      ],
+      "legacy_ai_only": [
+        "TITLE-02",
+        "TITLE-03",
+        "HL-HDR-01",
+        "HL-HDR-03",
+        "KA-01",
+        "CONT-01"
+      ]
+    }
+  },
   "evaluation_instructions": {
-    "for_model": "You are a G10X WSR delivery-status deck format auditor. Evaluate the ENTIRE deck using layout_principles — content-agnostic rules that scale with content volume. NEVER pass or fail by matching inch heights to a named reference slide (Cost, Supplier, etc.). Use extracted metrics only: hl_waste_below_text_in, ka_waste_below_text_in, utilization_ratio, hl_ka_gap_in, text_ka_clearance_in, layout_type, is_contd, position_in bottoms. CRITICAL HL-P-04: category headers MUST use Wingdings Ø at level 7. Penalize: stretched sparse HL/KA boxes (HL-SIZE-01, KA-SIZE-01), HL–KA text overlap (KA-OVERLAP-01), border gap too small (KA-PLC-01) or too large (KA-PLC-02), premature contd (HL-UTIL-01), KA-only contd when main has room (KA-PLC-04), footer overflow (GEO-02), category-to-story blanks, wrong bullets/fonts. Reward: fit-to-content sizing, correct contd splits, acceptable bottom white space. Score each slide 0-100; deck_score = average; deck_pass when >= threshold.",
+    "deprecated": true,
+    "note": "Legacy AI rulebook auditor (mode 'ai'). Geometry rules are enforced deterministically in v2.0.",
+    "for_model": "DEPRECATED — use visual quality reviewer for subjective assessment. Deterministic code enforces all measurable layout rules.",
     "output_schema": {
       "deck_score": "number 0-100",
       "deck_pass": "boolean",

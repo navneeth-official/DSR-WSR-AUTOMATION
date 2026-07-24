@@ -69,14 +69,17 @@ def repair_deck_until_pass(
     *,
     max_rounds: int = 5,
     pass_threshold: float = 80,
-    run_evaluation: bool = True,
+    run_evaluation: bool = False,
     rulebook_path: Path | None = None,
     fix_all: bool = True,
     scope_all_slides: bool = True,
 ) -> RepairResult:
     """
-    Run repair loop until ALL violations are fixed (including minor) and optional
-    per-slide AI eval is clean. Saves {ppt}.repair_log.json alongside the deck.
+    Run repair loop until ALL deterministic violations are fixed.
+    Saves {ppt}.repair_log.json alongside the deck.
+
+    Pass ``run_evaluation=True`` only for legacy AI rulebook re-check (deprecated).
+    v2.0 repair pass/fail is driven solely by ``detect_deck_violations``.
     """
     ppt_path = Path(ppt_path)
     content_json_path = Path(content_json_path)

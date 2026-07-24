@@ -276,7 +276,7 @@ def main() -> None:
                 from app.paths import evaluation_report_paths
 
                 ev = repair_result.final_evaluation
-                eval_json_path, eval_report_path = evaluation_report_paths(ppt_path)
+                eval_json_path, eval_report_path, _ = evaluation_report_paths(ppt_path)
                 eval_json_path.write_text(
                     json.dumps(ev, indent=2, ensure_ascii=False),
                     encoding="utf-8",

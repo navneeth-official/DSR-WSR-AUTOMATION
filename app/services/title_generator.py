@@ -15,6 +15,11 @@ from app.constants.ppt_mapping import MAX_TITLE_LENGTH
 if TYPE_CHECKING:
     from app.models.jira_story import JiraStory
 
+
+class TitleGenerationError(Exception):
+    """Raised when GPT title generation fails and fallback is disabled."""
+
+
 SYSTEM_PROMPT = """You write one-line WSR slide bullets for H-E-B delivery status decks.
 Output a single short action phrase (Validate, Implement, Add, Fix, Update, …) that tells a non-technical reader what was done.
 Rules:
@@ -92,8 +97,9 @@ def generate_title(
     summary: str,
     description: str | None,
     model: str,
+    allow_fallback: bool = True,
 ) -> str:
-    """Call GPT-4o mini for one story title; fallback on failure."""
+    """Call GPT-4o mini for one story title; optional fallback on failure."""
     desc = (description or "")[:DESCRIPTION_MAX_CHARS]
     user_msg = f"jira_key: {jira_key}\nsummary: {summary}\ndescription: {desc}"
 
@@ -110,10 +116,62 @@ def generate_title(
         content = response.choices[0].message.content
         if content:
             return _clean_model_output(content)
+        if not allow_fallback:
+            raise TitleGenerationError(
+                f"GPT returned empty title for {jira_key}"
+            )
+    except TitleGenerationError:
+        raise
     except Exception as exc:
+        if not allow_fallback:
+            raise TitleGenerationError(
+                f"GPT title failed for {jira_key}: {exc}"
+            ) from exc
         print(f"  Warning: GPT title failed for {jira_key}: {exc}")
 
     return fallback_title(summary, description)
+
+
+def _story_has_title_source(summary: str, description: str | None) -> bool:
+    return bool(summary and summary.strip()) or bool(
+        description and description.strip()
+    )
+
+
+def generate_and_assign_title(story: JiraStory) -> bool:
+    """
+    Generate and set ``story.title`` via GPT when missing.
+
+    Returns True when a new title was generated, False when an existing title
+    was kept or there is no summary/description to generate from.
+
+    Raises TitleGenerationError when LLM credentials are missing or GPT fails.
+    """
+    if story.title and story.title.strip():
+        return False
+
+    if not _story_has_title_source(story.summary, story.description):
+        return False
+
+    if not llm_configured():
+        raise TitleGenerationError(
+            "LLM credentials required for title generation. "
+            "Set AZURE_OPENAI_* or OPENAI_API_KEY in .env"
+        )
+
+    client, model = create_llm_client()
+    if not client or not model:
+        raise TitleGenerationError("Failed to create LLM client")
+
+    story.title = generate_title(
+        client,
+        jira_key=story.jira_key,
+        summary=story.summary,
+        description=story.description,
+        model=model,
+        allow_fallback=False,
+    )
+    return True
 
 
 def ensure_story_titles(

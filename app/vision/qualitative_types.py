@@ -8,24 +8,30 @@ from typing import Any
 
 from app.constants.vision_qualitative_reviewer_prompt import (
     ALLOWED_QUALITATIVE_CATEGORIES,
+    LEGACY_GEOMETRY_CATEGORIES,
     SLIDE_STATUS_NEEDS_REVIEW,
     SLIDE_STATUS_OK,
+    VISUAL_SCORE_PASS_THRESHOLD,
 )
 
 
 class QualitativeCategory(str, Enum):
-    OVERLAP = "overlap"
-    CLIPPED_TEXT = "clipped_text"
-    EXCESSIVE_WHITESPACE = "excessive_whitespace"
     POOR_VISUAL_BALANCE = "poor_visual_balance"
-    UNREADABLE_LAYOUT = "unreadable_layout"
+    EXCESSIVE_WHITESPACE = "excessive_whitespace"
+    CRAMPED_LAYOUT = "cramped_layout"
+    WEAK_HIERARCHY = "weak_hierarchy"
+    OFF_TEMPLATE = "off_template"
+    HL_OVERSIZED_FOR_CONTENT = "hl_oversized_for_content"
+    PREMATURE_HL_CONTINUATION = "premature_hl_continuation"
     NO_ISSUE = "no_issue"
 
     @classmethod
-    def from_raw(cls, value: str | None) -> QualitativeCategory:
+    def from_raw(cls, value: str | None) -> QualitativeCategory | None:
         if value in ALLOWED_QUALITATIVE_CATEGORIES:
             return cls(value)  # type: ignore[arg-type]
-        return cls.NO_ISSUE
+        if value in LEGACY_GEOMETRY_CATEGORIES:
+            return None
+        return None
 
 
 class ReviewStatus(str, Enum):
@@ -55,14 +61,18 @@ class QualitativeSlideReview:
     status: ReviewStatus
     overall_quality: str
     issues: tuple[QualitativeIssue, ...] = ()
+    visual_score: float | None = None
+    category_scores: dict[str, float] = field(default_factory=dict)
+    strengths: tuple[str, ...] = ()
 
     @property
     def passes(self) -> bool:
+        if self.visual_score is not None and self.visual_score < VISUAL_SCORE_PASS_THRESHOLD:
+            return False
         if self.status == ReviewStatus.OK:
             return True
         return not any(
-            i.category != QualitativeCategory.NO_ISSUE
-            and i.severity in ("high", "medium")
+            i.severity in ("high", "medium")
             for i in self.issues
         )
 
@@ -72,7 +82,10 @@ class QualitativeSlideReview:
             "status": self.status.value,
             "pass": self.passes,
             "overall_quality": self.overall_quality,
+            "visual_score": self.visual_score,
+            "category_scores": dict(self.category_scores),
             "issues": [i.to_dict() for i in self.issues],
+            "strengths": list(self.strengths),
         }
 
 
@@ -81,7 +94,7 @@ class QualitativeReviewReport:
     deck_pass: bool
     slides: list[QualitativeSlideReview] = field(default_factory=list)
     summary: str = ""
-    evaluator: str = "qualitative_vision_reviewer"
+    evaluator: str = "visual_quality_reviewer"
     vision_model: str = ""
 
     def to_dict(self) -> dict[str, Any]:

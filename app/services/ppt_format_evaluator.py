@@ -1,12 +1,21 @@
-"""AI-powered PPT format evaluation against G10X rulebook using Azure OpenAI."""
+"""AI-powered PPT format evaluation against G10X rulebook using Azure OpenAI.
+
+.. deprecated::
+    v2.0 hybrid architecture uses deterministic code for all measurable layout
+    rules and the visual quality reviewer for subjective assessment.
+    This module is retained only for legacy ``mode='ai'`` compatibility.
+"""
 
 from __future__ import annotations
+
+import warnings
 
 import json
 from pathlib import Path
 from typing import Any
 
 from app.services.ppt_format_extractor import extract_deck
+from app.services.ppt_format_violations import compute_service_chains
 from app.services.title_generator import create_llm_client
 
 RULEBOOK_PATH = Path(__file__).resolve().parents[1] / "constants" / "ppt_format_rulebook.json"
@@ -16,26 +25,50 @@ SYSTEM_PROMPT = """You are a G10X H-E-B WSR delivery-status PowerPoint format au
 You receive:
 1. The official format rulebook (JSON), including layout_principles.
 2. Extracted structural metrics from each slide in the deck under review.
+3. service_chains — per-service main + (Contd...) grouping with cross-slide signals.
 
 CONTENT-AGNOSTIC RULE (mandatory):
 - NEVER pass or fail a slide by comparing inch heights to a named reference slide (Cost, Supplier, Wentworth, etc.).
-- Judge layout using content-relative metrics from layout_principles.metrics_the_ai_must_use only.
+- Judge layout using content-relative metrics from layout_principles.metrics_the_ai_must_use and service_chains.
 
 Your job:
 - Evaluate EVERY slide titled "Delivery status – …" (main, contd, template placeholders).
 - Score EACH slide 0-100 across: typography, bullet_hierarchy, spacing, layout_geometry, content_structure, space_utilization.
 - deck_score = average of all delivery-status slide scores; deck_pass when >= threshold.
 
-Layout principle audit checklist (use extracted metrics):
-1. Dynamic sizing: sparse HL/KA shrink to text (HL-SIZE-01, KA-SIZE-01, CONT-SPARSE-01). White space at slide bottom is valid.
-2. HL–KA spacing when both on slide: hl_ka_gap_in between -0.12 and 0.25 in; text_ka_clearance_in >= 0.15 in (KA-OVERLAP-01, KA-PLC-01, KA-PLC-02).
-3. Footer boundary: highlights/key_activities position_in.bottom <= 6.29 in (GEO-02).
-4. Continuation: apply contd_decision_tree — penalize HL-UTIL-01 (premature HL contd), KA-PLC-04 (KA-only contd when main has room for both HL+KA). Do NOT penalize KA-PLC-04 when main HL is dense/full (utilization >= 0.85) and KA cannot fit below HL on main (Supplier pattern).
-5. No overlap: text must not intrude into KA; sections left-aligned.
-6. Bullets: HL-P-04 critical — category headers Wingdings Ø level 7 only; stories lvl 1 dash.
+Layout principle audit checklist (use extracted metrics — human reviewer style):
 
-Penalize heavily: category_bullet_violations (critical), stretched sparse boxes, HL–KA overlap, excessive HL–KA gap, footer overflow, premature contd.
-Reward: fit-to-content sizing, correct contd splits, acceptable bottom white space.
+1. HL internal slack (inside the HL gray box, below last bullet):
+   - Metric: hl_waste_below_text_in compared to calibrated bands (dense-fill vs sparse HL+KA).
+   - Judge from measured utilization, KA presence, and waste — never from is_contd or main vs contd labels.
+   - Flag HL-SIZE-01 / CONT-SPARSE-01 only when waste exceeds the layout-appropriate calibrated band.
+
+2. HL–KA tab spacing (the double-arrow gap — table bottom to KA header):
+   - Metric: hl_ka_gap_in ONLY (NOT text_ka_clearance_in, NOT utilization_ratio).
+   - Template target: ~0.31 in (~2 body lines). Max allowed: 0.36 in.
+   - Flag KA-PLC-02 (major) when hl_ka_gap_in > 0.36 in.
+   - When hl_ka_gap_in <= 0.36 in, spacing is CORRECT — do not penalize even if text_ka_clearance_in is larger due to internal HL slack.
+
+3. Overlap (geometry only): KA-OVERLAP-01 if text_ka_clearance_in < 0.15; HL-OVERFLOW-01 if hl_text_overflow_in > 0; GEO-02 if RENDERED text enters footer.
+
+4. Sprint/section spacing: do NOT count blank lines (HL-SPC-03 relaxed). Flag HL-SPC-01 only when category merges with first story.
+
+5. Continuation (context only):
+   - service_chains group related slides but must NOT change waste thresholds by slide type.
+   - NEVER flag "missing HL tab" on layout_type ka_only_contd (KA-PLC-03).
+   - KA-PLC-04: per-slide — HL present, no KA on slide, measured room for KA below HL.
+
+6. Bullets: HL-P-04 critical — category headers Wingdings Ø level 7 only.
+
+7. HL typography (font, size, line spacing inside the HL tab):
+   - HL-HDR-02: Highlights header Manrope Bold 14pt
+   - HL-P-01..05: body roles use Manrope / Manrope Light 12pt per rulebook roles
+   - HL-SPC-02: line spacing 16pt fixed (template spcPts 1600) within story lists
+   - HL-SPC-04: story bullets spcBef=0
+   - Use highlights.header_metrics, highlights.paragraphs[].runs, line_spacing_pt, spc_bef_pt from extraction.
+
+Penalize: overlaps/clipping, wrong bullets, hl_ka_gap_in > 0.36 in, internal HL waste above calibrated band, HL typography violations (HL-HDR-02, HL-P-01..05, HL-SPC-02, HL-SPC-04).
+Do NOT penalize: low utilization when waste is within the layout-appropriate band; hl_ka_gap_in within 0.31–0.36 in band.
 
 Return ONLY valid JSON matching output_schema in rulebook evaluation_instructions. No markdown fences."""
 
@@ -59,9 +92,12 @@ def _build_user_prompt(rulebook: dict, deck_data: dict) -> str:
         {
             "rulebook": rulebook,
             "layout_principles": rulebook.get("layout_principles", {}),
+            "service_chains": compute_service_chains(compact.get("slides", [])),
             "deck_under_review": compact,
             "task": (
-                "Evaluate format compliance using layout_principles and content-relative metrics. "
+                "Evaluate format compliance using layout_principles, service_chains, and "
+                "content-relative metrics. Use measured layout only — never change thresholds "
+                "by is_contd. Never penalize ka_only_contd for missing HL. "
                 "Return JSON per output_schema."
             ),
         },
@@ -76,7 +112,15 @@ def evaluate_deck_format(
     """
     Extract deck metrics and call Azure OpenAI for format scoring.
     Returns evaluation JSON with deck_score, deck_pass, per-slide scores.
+
+    .. deprecated:: Use ``evaluate_ppt_format(mode='full')`` for hybrid evaluation.
     """
+    warnings.warn(
+        "evaluate_deck_format is deprecated; use evaluate_ppt_format(mode='full') "
+        "for hybrid deterministic + visual evaluation.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     rulebook = load_rulebook(rulebook_path)
     deck_data = extract_deck(ppt_path)
 

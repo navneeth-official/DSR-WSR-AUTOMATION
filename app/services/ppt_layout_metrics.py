@@ -6,15 +6,21 @@ from pptx.oxml.ns import qn
 
 EMU_PER_INCH = 914400
 MIN_TEXT_KA_CLEARANCE_IN = 0.15
+HL_KA_TAB_GAP_LINES = 2  # white space between HL table bottom and KA header (user reference)
+CANONICAL_LINE_HEIGHT_EMU = 142875  # supplier sustainment story line (~0.156 in)
+HL_KA_TARGET_BORDER_GAP_IN = round(
+    HL_KA_TAB_GAP_LINES * CANONICAL_LINE_HEIGHT_EMU / EMU_PER_INCH, 4
+)
 CANONICAL_PARA_SLOTS = 20
 UTILIZATION_THRESHOLD = 0.85
 SPARSE_CONTD_MAX_FILLED = 3
 MIN_KA_BLOCK_IN = 1.0  # min vertical room to place KA below sparse HL on main
 DEFAULT_EMPTY_KA_HEIGHT_IN = 0.73  # typical empty KA table height on main slide
-SPARSE_HL_MAX_WASTE_IN = 0.5  # max empty HL area below text when under-filled
-SPARSE_KA_MAX_WASTE_IN = 0.5
-HL_KA_MIN_BORDER_GAP_IN = -0.12  # table borders may touch slightly
-HL_KA_MAX_BORDER_GAP_IN = 0.28  # slight tolerance for rounding
+SPARSE_HL_MAX_WASTE_IN = 2.4  # template allows large intentional slack (Location ~1.14 in)
+SPARSE_KA_MAX_WASTE_IN = 1.2
+# Border gap between HL/KA tables is NOT enforced — template uses overlap; use text clearance.
+HL_KA_MIN_BORDER_GAP_IN = -0.15
+HL_KA_MAX_BORDER_GAP_IN = 3.0
 FOOTER_MAX_BOTTOM_IN = 6.29
 FOOTER_MAX_HL_DENSE_BOTTOM_IN = 6.55  # dense HL-only main may fill toward dotted line
 CANONICAL_KA_ITEM_SLOTS = 6  # reference KA capacity for utilization
@@ -22,6 +28,12 @@ CANONICAL_KA_ITEM_SLOTS = 6  # reference KA capacity for utilization
 _CHARS_PER_VISUAL_LINE = {0: 92, 1: 72, 7: 80}
 _DEFAULT_CHARS_PER_LINE = 85
 _VISUAL_LINE_HEIGHT_BUFFER = 1.12
+
+
+def hl_ka_tab_gap_emu(canonical_line_height_emu: int | None = None) -> int:
+    """EMU gap between Highlights table bottom and Key Activities table top."""
+    line_h = canonical_line_height_emu or CANONICAL_LINE_HEIGHT_EMU
+    return HL_KA_TAB_GAP_LINES * line_h
 
 
 def paragraph_text(p_elem) -> str:
@@ -74,15 +86,26 @@ def inner_content_bottom_emu(hl_shape) -> int:
     return hl_shape.top + r0 + r1 + r2 - mar_b
 
 
-def estimated_text_bottom_emu(hl_shape, *, ref_para_count: int = 15, ref_r2: int = 1) -> int:
+def estimated_text_bottom_emu(
+    hl_shape,
+    *,
+    ref_para_count: int = 15,
+    ref_r2: int | None = None,
+    per_line_emu: int | None = None,
+) -> int:
     """Wrap-aware text end position inside Highlights content cell."""
     r0, r1 = hl_shape.table.rows[0].height, hl_shape.table.rows[1].height
     mar_t, _ = cell_margins(hl_shape.table.cell(2, 0))
-    ref_para_count = max(ref_para_count, 1)
-    per_line = ref_r2 / max(ref_para_count - 2, 1)
     para_count = count_hl_paragraphs(hl_shape)
     visual = count_visual_lines_in_hl(hl_shape)
     line_count = max(para_count, visual)
+    if per_line_emu is not None:
+        per_line = per_line_emu
+    elif ref_r2 is not None:
+        ref_para_count = max(ref_para_count, 1)
+        per_line = ref_r2 / max(ref_para_count - 2, 1)
+    else:
+        per_line = CANONICAL_LINE_HEIGHT_EMU
     content_h = int(per_line * line_count * _VISUAL_LINE_HEIGHT_BUFFER)
     return hl_shape.top + r0 + r1 + mar_t + content_h
 
@@ -92,11 +115,15 @@ def rendered_text_bottom_emu(
     *,
     ref_para_count: int = 15,
     ref_r2: int | None = None,
+    per_line_emu: int | None = None,
 ) -> int:
     """Wrap-aware text end for G10X text-to-KA clearance (never underestimate)."""
-    if ref_r2 is None:
-        ref_r2 = hl_shape.table.rows[2].height
-    est = estimated_text_bottom_emu(hl_shape, ref_para_count=ref_para_count, ref_r2=ref_r2)
+    est = estimated_text_bottom_emu(
+        hl_shape,
+        ref_para_count=ref_para_count,
+        ref_r2=ref_r2,
+        per_line_emu=per_line_emu or CANONICAL_LINE_HEIGHT_EMU,
+    )
     inner = inner_content_bottom_emu(hl_shape)
     return max(est, inner)
 
@@ -110,8 +137,13 @@ def text_ka_clearance_in(hl_shape, ka_shape, *, ref_para_count: int = 15, ref_r2
     return round((ka_shape.top - text_bottom) / EMU_PER_INCH, 4)
 
 
-def hl_waste_below_text_in(hl_shape, *, ref_para_count: int = 15, ref_r2: int | None = None) -> float:
-    """Empty HL area below visible text (wrap-aware; uses current row height when set)."""
+def hl_waste_below_text_in_estimated(
+    hl_shape,
+    *,
+    ref_para_count: int = 15,
+    ref_r2: int | None = None,
+) -> float:
+    """Legacy estimate: empty HL area below text using canonical line-height model."""
     if ref_r2 is None:
         ref_r2 = hl_shape.table.rows[2].height
     hl_bottom = hl_shape.top + hl_shape.height
@@ -119,6 +151,46 @@ def hl_waste_below_text_in(hl_shape, *, ref_para_count: int = 15, ref_r2: int | 
         hl_shape, ref_para_count=ref_para_count, ref_r2=ref_r2
     )
     return round(max((hl_bottom - text_bottom) / EMU_PER_INCH, 0), 4)
+
+
+def hl_waste_below_text_in(
+    hl_shape,
+    *,
+    ref_para_count: int = 15,
+    ref_r2: int | None = None,
+    measured_text_bottom_in: float | None = None,
+    measured_hl_bottom_in: float | None = None,
+) -> float:
+    """
+    Empty HL area below visible text.
+
+    Prefer ``measured_*`` from COM/image bounds; falls back to estimation.
+    """
+    if measured_text_bottom_in is not None:
+        if measured_hl_bottom_in is not None:
+            hl_bottom_in = measured_hl_bottom_in
+        else:
+            hl_bottom_in = (hl_shape.top + hl_shape.height) / EMU_PER_INCH
+        return round(max(hl_bottom_in - measured_text_bottom_in, 0.0), 4)
+    return hl_waste_below_text_in_estimated(
+        hl_shape, ref_para_count=ref_para_count, ref_r2=ref_r2
+    )
+
+
+def ka_rendered_text_bottom_emu(ka_shape) -> int:
+    """Bottom of visible KA content (header when empty, last bullet otherwise)."""
+    r0 = ka_shape.table.rows[0].height
+    items = count_ka_items(ka_shape)
+    if items == 0:
+        return ka_shape.top + r0
+    mar_t, _ = cell_margins(ka_shape.table.cell(1, 0))
+    per_line = 50292
+    content_h = int(items * per_line * _VISUAL_LINE_HEIGHT_BUFFER)
+    return ka_shape.top + r0 + mar_t + content_h
+
+
+def ka_rendered_text_bottom_in(ka_shape) -> float:
+    return round(ka_rendered_text_bottom_emu(ka_shape) / EMU_PER_INCH, 4)
 
 
 def count_ka_items(ka_shape) -> int:

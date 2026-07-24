@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.database import SessionLocal
 from app.repositories.jira_story_repository import JiraStoryRepository
 from app.services.rovo_import import import_rovo_payload
+from app.services.title_generator import TitleGenerationError
 
 
 def main() -> None:
@@ -40,6 +41,9 @@ def main() -> None:
         repo = JiraStoryRepository(db)
         keys = import_rovo_payload(repo, payload)
         print(f"Imported {len(keys)} stories: {', '.join(keys)}")
+    except TitleGenerationError as exc:
+        print(f"Import failed — title generation error: {exc}")
+        sys.exit(1)
     finally:
         db.close()
 

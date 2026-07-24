@@ -1,24 +1,21 @@
-"""Deterministic spacing/layout violation detection for delivery-status slides."""
+"""Deterministic spacing/layout violation detection for delivery-status slides.
+
+Rules follow visual-principles evaluation calibrated from the G10X WSR template:
+overlap and clipping are geometry-based on rendered content; whitespace and box
+height variations within template bands are acceptable.
+"""
 
 from __future__ import annotations
 
 import re
 from typing import Any
 
+from app.services.ppt_hl_typography import detect_hl_typography_violations
 from app.services.ppt_layout_metrics import (
-    FOOTER_MAX_BOTTOM_IN,
-    FOOTER_MAX_HL_DENSE_BOTTOM_IN,
     DEFAULT_EMPTY_KA_HEIGHT_IN,
-    HL_KA_MAX_BORDER_GAP_IN,
-    HL_KA_MIN_BORDER_GAP_IN,
-    MIN_KA_BLOCK_IN,
-    MIN_TEXT_KA_CLEARANCE_IN,
-    SPARSE_CONTD_MAX_FILLED,
-    SPARSE_HL_MAX_WASTE_IN,
-    SPARSE_KA_MAX_WASTE_IN,
-    UTILIZATION_THRESHOLD,
-    hl_is_dense,
+    HL_KA_TARGET_BORDER_GAP_IN,
 )
+from app.services.template_calibration import TemplateLayoutThresholds, load_thresholds
 
 
 def _service_base_title(title: str) -> str:
@@ -26,31 +23,242 @@ def _service_base_title(title: str) -> str:
     return re.sub(r"\s*\(Contd.*\)\s*$", "", base, flags=re.I).strip()
 
 
-def _main_hl_is_dense(main: dict[str, Any]) -> bool:
-    hl = main.get("highlights")
-    if not hl:
+def _hl_effective_util(hl: dict[str, Any]) -> float | None:
+    util = hl.get("effective_utilization_ratio", hl.get("utilization_ratio"))
+    return float(util) if util is not None else None
+
+
+def _is_hl_dense_fill(hl: dict[str, Any], thresholds: TemplateLayoutThresholds) -> bool:
+    util = _hl_effective_util(hl)
+    return (
+        util is not None
+        and util >= thresholds.hl_dense_fill_min_effective_util
+    )
+
+
+def _is_contd_hl_slide(slide: dict[str, Any]) -> bool:
+    """HL overflow continuation slide (not KA-only contd)."""
+    if not slide.get("is_contd") or not slide.get("highlights"):
         return False
-    return hl_is_dense(hl)
+    return slide.get("layout_type") != "ka_only_contd"
 
 
-def _ka_would_fit_on_main(main: dict[str, Any]) -> bool:
-    """True when an empty KA table fits below HL text within the footer zone."""
-    text_bottom = main.get("hl_text_bottom_for_fit_in") or main.get(
+def _contd_hl_oversized(
+    slide: dict[str, Any],
+    thresholds: TemplateLayoutThresholds,
+) -> bool:
+    """
+    Continuation HL slide keeps the main-slide gray box height while carrying
+    sparse overflow — flag when internal waste exceeds the tight contd band.
+    """
+    if not _is_contd_hl_slide(slide):
+        return False
+    waste = slide.get("hl_waste_below_text_in")
+    if waste is None:
+        return False
+    return float(waste) > thresholds.hl_waste_contd_hl_max_in
+
+
+def _hl_room_below_table_to_footer(slide: dict[str, Any]) -> float | None:
+    """White space on slide below the HL table border (not inside the gray box)."""
+    bottom = slide.get("hl_bottom_measured_in")
+    if bottom is None:
+        hl = slide.get("highlights") or {}
+        bottom = hl.get("position_in", {}).get("bottom")
+    if bottom is None:
+        return None
+    limit = load_thresholds().footer_content_max_bottom_in
+    return round(max(limit - float(bottom), 0), 4)
+
+
+def _hl_waste_limit(
+    slide: dict[str, Any],
+    thresholds: TemplateLayoutThresholds,
+) -> float:
+    """
+    Calibrated internal-waste band from measured layout, not slide labels.
+
+    Dense-fill slides (high effective utilization) use a tight band.
+    Sparse HL with a Key Activities section uses the wider template band.
+    """
+    hl = slide.get("highlights") or {}
+    if _is_hl_dense_fill(hl, thresholds):
+        return thresholds.hl_waste_dense_fill_max_in
+    if slide.get("key_activities") is not None:
+        return thresholds.hl_waste_sparse_ka_max_in
+    return thresholds.hl_waste_dense_fill_max_in
+
+
+def _excessive_hl_ka_spacing(
+    slide: dict[str, Any],
+    thresholds: TemplateLayoutThresholds,
+) -> str | None:
+    """
+    HL table bottom → KA header gap (the double-arrow spacing).
+    Reference: ~0.31 in (~2 body lines). Flag only when hl_ka_gap_in exceeds max.
+    """
+    if slide.get("key_activities") is None:
+        return None
+    gap = slide.get("hl_ka_gap_in")
+    if gap is None:
+        return None
+    target = thresholds.hl_ka_border_gap_target_in
+    max_gap = thresholds.hl_ka_border_gap_max_in
+    if gap > max_gap:
+        return (
+            f"HL table bottom to KA header gap {gap} in exceeds template "
+            f"~{target:.2f} in (max {max_gap:.2f} in, ~2 body lines)"
+        )
+    return None
+
+
+def _hl_internal_waste_excessive(
+    slide: dict[str, Any],
+    thresholds: TemplateLayoutThresholds,
+) -> bool:
+    """Empty gray inside HL box below last bullet, above calibrated reference band."""
+    waste = slide.get("hl_waste_below_text_in")
+    if waste is None:
+        return False
+    return waste > _hl_waste_limit(slide, thresholds)
+
+
+def _sparse_hl_with_ka_oversized(
+    hl: dict[str, Any],
+    slide: dict[str, Any],
+    thresholds: TemplateLayoutThresholds,
+) -> bool:
+    """Sparse HL + KA layout with HL box larger than the approved template band."""
+    if _is_contd_hl_slide(slide):
+        return False
+    if slide.get("key_activities") is None:
+        return False
+    util = _hl_effective_util(hl)
+    if util is None or util >= thresholds.hl_dense_fill_min_effective_util:
+        return False
+    return _hl_internal_waste_excessive(slide, thresholds)
+
+
+def compute_service_chains(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per-service slide grouping for contextual AI review (not threshold selection)."""
+    by_service: dict[str, dict[str, Any]] = {}
+    for slide in slides:
+        base = _service_base_title(slide.get("title", ""))
+        bucket = by_service.setdefault(
+            base, {"main": None, "contd_hl": [], "contd_ka_only": None}
+        )
+        if slide.get("is_contd"):
+            if slide.get("layout_type") == "ka_only_contd":
+                bucket["contd_ka_only"] = slide
+            elif slide.get("highlights"):
+                bucket["contd_hl"].append(slide)
+        else:
+            bucket["main"] = slide
+
+    chains: list[dict[str, Any]] = []
+    for service, pair in by_service.items():
+        main = pair.get("main")
+        if not main:
+            continue
+        contd_hl = pair.get("contd_hl") or []
+        contd_ka = pair.get("contd_ka_only")
+        hl = main.get("highlights") or {}
+        chain: dict[str, Any] = {
+            "service": service,
+            "main_slide_index": main.get("slide_index"),
+            "main_layout_type": main.get("layout_type"),
+            "main_hl_para_util": hl.get("utilization_ratio"),
+            "main_hl_effective_util": hl.get("effective_utilization_ratio"),
+            "main_hl_visual_lines": hl.get("visual_line_count"),
+            "main_hl_waste_below_text_in": main.get("hl_waste_below_text_in"),
+            "main_hl_room_below_table_in": _hl_room_below_table_to_footer(main),
+            "contd_hl_slide_indices": [s.get("slide_index") for s in contd_hl],
+            "ka_only_contd_slide_index": (
+                contd_ka.get("slide_index") if contd_ka else None
+            ),
+        }
+        if contd_hl:
+            sparsest = min(
+                contd_hl,
+                key=lambda s: (s.get("highlights") or {}).get(
+                    "filled_paragraph_count", 999
+                ),
+            )
+            chl = sparsest.get("highlights") or {}
+            chain["sparsest_contd_slide_index"] = sparsest.get("slide_index")
+            chain["sparsest_contd_filled_paras"] = chl.get("filled_paragraph_count")
+            chain["sparsest_contd_util"] = chl.get("utilization_ratio")
+        chains.append(chain)
+    return chains
+
+
+def _ka_would_fit_below_hl(
+    slide: dict[str, Any],
+    thresholds: TemplateLayoutThresholds,
+) -> bool:
+    """True when an empty KA table fits below HL with typical template clearance."""
+    hl = slide.get("highlights") or {}
+    hl_bottom = slide.get("hl_bottom_measured_in")
+    if hl_bottom is None:
+        hl_bottom = hl.get("position_in", {}).get("bottom")
+    text_bottom = slide.get("hl_text_bottom_for_fit_in") or slide.get(
         "estimated_text_bottom_in"
     )
-    if text_bottom is None:
+    if hl_bottom is not None:
+        ka_top = float(hl_bottom) + HL_KA_TARGET_BORDER_GAP_IN
+    elif text_bottom is not None:
+        ka_top = float(text_bottom) + thresholds.min_text_ka_clearance_in
+    else:
         return False
-    ka_top = text_bottom + MIN_TEXT_KA_CLEARANCE_IN
-    return ka_top + DEFAULT_EMPTY_KA_HEIGHT_IN <= FOOTER_MAX_BOTTOM_IN
+    return ka_top + DEFAULT_EMPTY_KA_HEIGHT_IN <= thresholds.footer_content_max_bottom_in
 
 
-def _expected_sprint_gaps(paras: list[dict]) -> int:
-    sprint_count = sum(1 for p in paras if p.get("role") == "sprint_line")
-    return max(sprint_count - 1, 0)
+def _content_enters_footer(slide: dict[str, Any], thresholds: TemplateLayoutThresholds) -> bool:
+    """True when rendered HL or KA text extends into the footer reserved region."""
+    limit = thresholds.footer_content_max_bottom_in
+    hl_text = slide.get("rendered_text_bottom_in") or slide.get("estimated_text_bottom_in")
+    if hl_text is not None and hl_text > limit:
+        return True
+    ka_text = slide.get("ka_rendered_text_bottom_in")
+    if ka_text is not None and ka_text > limit:
+        return True
+    return False
 
 
-def detect_slide_violations(slide: dict[str, Any]) -> list[dict[str, Any]]:
+def _hl_visually_unbalanced(hl: dict[str, Any], slide: dict[str, Any], thresholds: TemplateLayoutThresholds) -> bool:
+    """
+    Extreme stretch only: nearly empty HL box with far more whitespace than the
+    template ever uses. Normal intentional slack (e.g. Location) is allowed.
+    """
+    util = _hl_effective_util(hl)
+    if util is None or util >= thresholds.hl_waste_stretch_max_util:
+        return False
+    waste = slide.get("hl_waste_below_text_in")
+    if waste is None:
+        return False
+    return waste > thresholds.hl_waste_extreme_in
+
+
+def _ka_visually_unbalanced(ka: dict[str, Any], slide: dict[str, Any], thresholds: TemplateLayoutThresholds) -> bool:
+    item_count = ka.get("item_count", 0)
+    if item_count == 0:
+        return False
+    util = ka.get("utilization_ratio")
+    if util is None or util >= thresholds.ka_waste_stretch_max_util:
+        return False
+    waste = slide.get("ka_waste_below_text_in")
+    if waste is None:
+        return False
+    return waste > thresholds.ka_waste_extreme_in
+
+
+def detect_slide_violations(
+    slide: dict[str, Any],
+    *,
+    thresholds: TemplateLayoutThresholds | None = None,
+) -> list[dict[str, Any]]:
     """Return violation dicts for one extracted slide."""
+    thresholds = thresholds or load_thresholds()
     violations: list[dict[str, Any]] = []
     idx = slide.get("slide_index")
     title = slide.get("title", "")
@@ -67,8 +275,17 @@ def detect_slide_violations(slide: dict[str, Any]) -> list[dict[str, Any]]:
         })
 
     hl = slide.get("highlights")
+    ka_on_slide = slide.get("key_activities") is not None
 
     if hl:
+        violations.extend(
+            detect_hl_typography_violations(
+                hl,
+                slide_index=idx,
+                title=title,
+            )
+        )
+
         if hl.get("category_bullet_violations"):
             violations.append({
                 "rule_id": "HL-P-04",
@@ -85,162 +302,148 @@ def detect_slide_violations(slide: dict[str, Any]) -> list[dict[str, Any]]:
                 "severity": "major",
                 "slide_index": idx,
                 "title": title,
-                "message": "Blank line between category header and first story",
-            })
-
-        paras = hl.get("paragraphs", [])
-        expected_gaps = _expected_sprint_gaps(paras)
-        actual_gaps = hl.get("blank_between_sprints", 0)
-        if actual_gaps != expected_gaps:
-            violations.append({
-                "rule_id": "HL-SPC-03",
-                "severity": "major",
-                "slide_index": idx,
-                "title": title,
-                "message": f"Expected {expected_gaps} sprint gap(s), found {actual_gaps}",
+                "message": "Blank line between category header and first story (sections merged)",
             })
 
         clearance = slide.get("text_ka_clearance_in")
-        if clearance is not None and clearance < MIN_TEXT_KA_CLEARANCE_IN:
+        if (
+            clearance is not None
+            and clearance < thresholds.min_text_ka_clearance_in
+            and ka_on_slide
+        ):
             violations.append({
                 "rule_id": "KA-OVERLAP-01",
                 "severity": "critical",
                 "slide_index": idx,
                 "title": title,
                 "message": (
-                    f"Highlights text may overlap Key Activities "
-                    f"(clearance {clearance} in < {MIN_TEXT_KA_CLEARANCE_IN} in)"
+                    f"Highlights text overlaps Key Activities "
+                    f"(clearance {clearance} in < {thresholds.min_text_ka_clearance_in} in)"
                 ),
             })
 
-        hl_ka_gap = slide.get("hl_ka_gap_in")
-        if hl_ka_gap is not None and hl_ka_gap < HL_KA_MIN_BORDER_GAP_IN:
+        overflow = slide.get("hl_text_overflow_in")
+        if (
+            overflow is not None
+            and overflow > thresholds.hl_text_overflow_tolerance_in
+            and ka_on_slide
+        ):
             violations.append({
-                "rule_id": "KA-PLC-01",
-                "severity": "major",
+                "rule_id": "HL-OVERFLOW-01",
+                "severity": "critical",
                 "slide_index": idx,
                 "title": title,
                 "message": (
-                    f"Highlights table bottom overlaps Key Activities "
-                    f"(gap {hl_ka_gap} in < {HL_KA_MIN_BORDER_GAP_IN} in)"
+                    f"Highlights text extends outside its table "
+                    f"({overflow} in past table bottom)"
                 ),
             })
-        if hl_ka_gap is not None and hl_ka_gap > HL_KA_MAX_BORDER_GAP_IN:
-            clearance_ok = (
-                clearance is not None and clearance >= MIN_TEXT_KA_CLEARANCE_IN
-            )
-            hl_bottom = hl.get("position_in", {}).get("bottom")
-            text_bottom = slide.get("estimated_text_bottom_in")
-            text_inside_hl = (
-                text_bottom is not None
-                and hl_bottom is not None
-                and text_bottom <= hl_bottom + 0.05
-            )
-            if clearance_ok and text_inside_hl:
-                violations.append({
-                    "rule_id": "KA-PLC-02",
-                    "severity": "major",
-                    "slide_index": idx,
-                    "title": title,
-                    "message": (
-                        f"Key Activities too far below Highlights "
-                        f"(gap {hl_ka_gap} in > {HL_KA_MAX_BORDER_GAP_IN} in)"
-                    ),
-                })
 
-        ka = slide.get("key_activities")
-        ka_has_items = ka is not None and ka.get("item_count", 0) > 0
-        if (
-            slide.get("is_contd")
-            and hl.get("filled_paragraph_count", 0) <= SPARSE_CONTD_MAX_FILLED
-            and ka_has_items
-            and slide.get("layout_type") == "hl_and_ka"
-        ):
-            violations.append({
-                "rule_id": "CONT-SPARSE-01",
-                "severity": "major",
-                "slide_index": idx,
-                "title": title,
-                "message": "Sparse Highlights on (Contd...) slide with few bullets",
-            })
-
-        util = hl.get("effective_utilization_ratio", hl.get("utilization_ratio"))
-        waste = slide.get("hl_waste_below_text_in")
-        if (
-            util is not None
-            and util < UTILIZATION_THRESHOLD
-            and waste is not None
-            and waste > SPARSE_HL_MAX_WASTE_IN
-            and not slide.get("is_contd")
-        ):
+        if _hl_visually_unbalanced(hl, slide, thresholds):
+            waste = slide.get("hl_waste_below_text_in")
             violations.append({
                 "rule_id": "HL-SIZE-01",
                 "severity": "major",
                 "slide_index": idx,
                 "title": title,
                 "message": (
-                    f"Highlights table oversized for sparse content "
-                    f"({waste} in empty below text)"
+                    f"Highlights box excessively stretched for sparse content "
+                    f"({waste} in empty below text, above template band)"
                 ),
             })
 
-    ka = slide.get("key_activities")
-    if ka:
-        ka_pos = ka.get("position_in", {})
-        ka_bottom = ka_pos.get("bottom")
-        if ka_bottom is not None and ka_bottom > FOOTER_MAX_BOTTOM_IN:
+        spacing_msg = _excessive_hl_ka_spacing(slide, thresholds)
+        if spacing_msg:
             violations.append({
-                "rule_id": "GEO-02",
-                "severity": "critical",
+                "rule_id": "KA-PLC-02",
+                "severity": "major",
                 "slide_index": idx,
                 "title": title,
-                "message": (
-                    f"Key Activities extends below footer safe zone "
-                    f"({ka_bottom} in > {FOOTER_MAX_BOTTOM_IN} in)"
-                ),
+                "message": spacing_msg,
             })
-        item_count = ka.get("item_count", 0)
-        ka_util = ka.get("utilization_ratio")
-        ka_waste = slide.get("ka_waste_below_text_in")
-        if (
-            item_count > 0
-            and ka_util is not None
-            and ka_util < UTILIZATION_THRESHOLD
-            and ka_waste is not None
-            and ka_waste > SPARSE_KA_MAX_WASTE_IN
-        ):
+
+        if _sparse_hl_with_ka_oversized(hl, slide, thresholds):
+            waste = slide.get("hl_waste_below_text_in")
             violations.append({
-                "rule_id": "KA-SIZE-01",
+                "rule_id": "CONT-SPARSE-01",
                 "severity": "major",
                 "slide_index": idx,
                 "title": title,
                 "message": (
-                    f"Key Activities table oversized for sparse content "
-                    f"({ka_waste} in empty below items)"
+                    "Sparse Highlights with Key Activities and oversized HL box"
+                    + (f" ({waste} in empty below text)" if waste is not None else "")
                 ),
             })
 
-    if hl:
-        hl_pos = hl.get("position_in", {})
-        hl_bottom = hl_pos.get("bottom")
-        if hl_bottom is not None:
-            ka_on_slide = slide.get("key_activities") is not None
-            hl_limit = (
-                FOOTER_MAX_HL_DENSE_BOTTOM_IN
-                if not ka_on_slide and hl_is_dense(hl)
-                else FOOTER_MAX_BOTTOM_IN
+        if _contd_hl_oversized(slide, thresholds):
+            waste = slide.get("hl_waste_below_text_in")
+            limit = thresholds.hl_waste_contd_hl_max_in
+            violations.append({
+                "rule_id": "CONT-HL-01",
+                "severity": "major",
+                "slide_index": idx,
+                "title": title,
+                "message": (
+                    "HL (Contd…) box is oversized for sparse overflow content"
+                    + (
+                        f" ({waste} in empty gray below text, limit {limit} in). "
+                        "Shrink the Highlights table height on this continuation slide."
+                        if waste is not None
+                        else ". Shrink the Highlights table height on this continuation slide."
+                    )
+                ),
+            })
+
+        if hl and not ka_on_slide and _ka_would_fit_below_hl(slide, thresholds):
+            hl_pos = hl.get("position_in", {})
+            hl_bottom = slide.get("hl_bottom_measured_in") or hl_pos.get("bottom")
+            text_bottom = slide.get("hl_text_bottom_for_fit_in") or slide.get(
+                "estimated_text_bottom_in"
             )
-            if hl_bottom > hl_limit:
-                violations.append({
-                    "rule_id": "GEO-02",
-                    "severity": "critical",
-                    "slide_index": idx,
-                    "title": title,
-                    "message": (
-                        f"Highlights extends below footer safe zone "
-                        f"({hl_bottom} in > {hl_limit} in)"
-                    ),
-                })
+            room_in = (
+                round(float(hl_bottom) - float(text_bottom), 4)
+                if hl_bottom is not None and text_bottom is not None
+                else None
+            )
+            violations.append({
+                "rule_id": "KA-PLC-04",
+                "severity": "critical",
+                "slide_index": idx,
+                "title": title,
+                "message": (
+                    "Key Activities absent but slide has room to fit HL + KA together"
+                    + (f" ({room_in} in below HL text)" if room_in is not None else "")
+                ),
+            })
+
+    ka = slide.get("key_activities")
+    if ka and _ka_visually_unbalanced(ka, slide, thresholds):
+        waste = slide.get("ka_waste_below_text_in")
+        violations.append({
+            "rule_id": "KA-SIZE-01",
+            "severity": "major",
+            "slide_index": idx,
+            "title": title,
+            "message": (
+                f"Key Activities box excessively stretched for sparse content "
+                f"({waste} in empty below items, above template band)"
+            ),
+        })
+
+    if _content_enters_footer(slide, thresholds):
+        hl_text = slide.get("estimated_text_bottom_in")
+        ka_text = slide.get("ka_rendered_text_bottom_in")
+        violations.append({
+            "rule_id": "GEO-02",
+            "severity": "critical",
+            "slide_index": idx,
+            "title": title,
+            "message": (
+                "Rendered content enters the footer safe zone "
+                f"(HL text {hl_text} in, KA text {ka_text} in, "
+                f"limit {thresholds.footer_content_max_bottom_in} in)"
+            ),
+        })
 
     return violations
 
@@ -250,14 +453,10 @@ def detect_deck_violations(
     *,
     content_titles: set[str] | None = None,
     scope_all_slides: bool = False,
+    thresholds: TemplateLayoutThresholds | None = None,
 ) -> dict[str, Any]:
-    """
-    Detect violations across deck, including cross-slide HL-UTIL-01
-    (main under-filled while HL contd exists for same service).
-
-    When content_titles is set, only slides whose service title appears in
-    ppt_content.json are in scope (excludes untouched G10X template placeholders).
-    """
+    """Detect violations across deck using per-slide layout measurements."""
+    thresholds = thresholds or load_thresholds()
     slides = deck_data.get("slides", [])
     if content_titles is not None and not scope_all_slides:
         allowed = {t.strip().lower() for t in content_titles}
@@ -267,84 +466,11 @@ def detect_deck_violations(
 
         slides = [s for s in slides if in_scope(s.get("title", ""))]
 
-    by_service: dict[str, dict[str, Any]] = {}
-
-    for slide in deck_data.get("slides", []):
-        base = _service_base_title(slide.get("title", ""))
-        bucket = by_service.setdefault(
-            base, {"main": None, "contd_hl": [], "contd_ka_only": None}
-        )
-        if slide.get("is_contd"):
-            if slide.get("layout_type") == "ka_only_contd":
-                bucket["contd_ka_only"] = slide
-            elif slide.get("highlights"):
-                bucket["contd_hl"].append(slide)
-        else:
-            bucket["main"] = slide
-
     all_violations: list[dict[str, Any]] = []
-
     for slide in slides:
-        all_violations.extend(detect_slide_violations(slide))
-
-    for service, pair in by_service.items():
-        main = pair.get("main")
-        contd_hl = pair.get("contd_hl") or []
-        contd_ka = pair.get("contd_ka_only")
-        if not main:
-            continue
-
-        hl = main.get("highlights")
-        if hl and contd_hl and not hl_is_dense(hl):
-            para_util = hl.get("utilization_ratio")
-            visual_lines = hl.get("visual_line_count")
-            effective = hl.get("effective_utilization_ratio", para_util)
-            all_violations.append({
-                "rule_id": "HL-UTIL-01",
-                "severity": "critical",
-                "slide_index": main.get("slide_index"),
-                "title": main.get("title"),
-                "service_title": service,
-                "message": (
-                    f"Main slide under-filled ({effective:.0%} effective"
-                    + (
-                        f", {para_util:.0%} paragraphs / {visual_lines} visual lines"
-                        if para_util is not None and visual_lines is not None
-                        else ""
-                    )
-                    + f") but HL (Contd...) exists for {service}"
-                ),
-            })
-
-        # KA-PLC-04: KA-only contd only when KA cannot fit below HL on the main slide.
-        # Dense HL-filled main (Supplier) + KA on contd is valid; sparse main with room is not.
-        if contd_ka and hl and main.get("key_activities") is None:
-            if not _main_hl_is_dense(main) and _ka_would_fit_on_main(main):
-                hl_pos = hl.get("position_in", {})
-                hl_bottom = hl_pos.get("bottom")
-                text_bottom = main.get("hl_text_bottom_for_fit_in") or main.get(
-                    "estimated_text_bottom_in"
-                )
-                room_in = (
-                    round(hl_bottom - text_bottom, 4)
-                    if hl_bottom is not None and text_bottom is not None
-                    else None
-                )
-                all_violations.append({
-                    "rule_id": "KA-PLC-04",
-                    "severity": "critical",
-                    "slide_index": main.get("slide_index"),
-                    "title": main.get("title"),
-                    "service_title": service,
-                    "message": (
-                        "Key Activities moved to (Contd...) but main slide has room "
-                        f"to fit HL + KA together"
-                        + (f" ({room_in} in below HL text)" if room_in is not None else "")
-                    ),
-                })
-            elif contd_hl and _main_hl_is_dense(main):
-                # supplier_contd: dense HL main + overflow on HL contd — expected pattern.
-                pass
+        all_violations.extend(
+            detect_slide_violations(slide, thresholds=thresholds)
+        )
 
     critical = [v for v in all_violations if v.get("severity") == "critical"]
     return {

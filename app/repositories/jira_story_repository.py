@@ -9,6 +9,7 @@ from app.models.project import Project
 from app.models.sprint import Sprint
 from app.repositories.project_repository import ProjectRepository
 from app.repositories.sprint_repository import SprintRepository
+from app.services.wsr_story_selection import select_wsr_story_snapshots
 
 
 class JiraStoryRepository:
@@ -99,6 +100,10 @@ class JiraStoryRepository:
         report range (inclusive).
 
         Overlap: sprint_start_date <= end_date AND sprint_end_date >= start_date
+
+        After sprint filtering, one snapshot row per ``jira_key`` is selected
+        via ``select_wsr_story_snapshots`` (latest in-range snapshot, else latest
+        overall).
         """
         sprint_eligible = and_(
             Sprint.sprint_start_date.is_not(None),
@@ -117,7 +122,8 @@ class JiraStoryRepository:
                 JiraStory.jira_key,
             )
         )
-        return list(self.db.scalars(stmt).unique().all())
+        candidates = list(self.db.scalars(stmt).unique().all())
+        return select_wsr_story_snapshots(candidates, start_date, end_date)
 
     def upsert(
         self,

@@ -22,6 +22,7 @@ from app.services.ppt_layout_metrics import (
     count_visual_lines_in_hl,
     effective_hl_utilization,
     hl_waste_below_text_in,
+    ka_rendered_text_bottom_in,
     ka_waste_below_text_in,
     rendered_text_bottom_emu,
     text_ka_clearance_in,
@@ -95,16 +96,29 @@ def _para_metrics(p_elem) -> dict[str, Any]:
             pt = spc_bef.find(qn("a:spcPts"))
             if pt is not None:
                 info["spc_bef_pt"] = int(pt.get("val", 0)) / 100
+        ln_spc = pPr.find(qn("a:lnSpc"))
+        if ln_spc is not None:
+            pt = ln_spc.find(qn("a:spcPts"))
+            if pt is not None:
+                info["line_spacing_pt"] = int(pt.get("val", 0)) / 100
+            pct = ln_spc.find(qn("a:spcPct"))
+            if pct is not None:
+                info["line_spacing_pct"] = int(pct.get("val", 0)) / 1000
     runs = []
     for r in p_elem.findall(qn("a:r")):
-        run: dict[str, Any] = {"text": (r.find(qn("a:t")).text or "")[:60]}
+        t_elem = r.find(qn("a:t"))
+        run: dict[str, Any] = {"text": ((t_elem.text if t_elem is not None else None) or "")[:60]}
         rPr = r.find(qn("a:rPr"))
         if rPr is not None:
             if rPr.get("b") is not None:
                 run["bold"] = rPr.get("b") == "1"
-            sz = rPr.find(qn("a:sz"))
-            if sz is not None:
-                run["size_pt"] = int(sz.get("val", 0)) / 100
+            sz_attr = rPr.get("sz")
+            if sz_attr is not None:
+                run["size_pt"] = int(sz_attr) / 100
+            else:
+                sz = rPr.find(qn("a:sz"))
+                if sz is not None:
+                    run["size_pt"] = int(sz.get("val", 0)) / 100
             latin = rPr.find(qn("a:latin"))
             if latin is not None:
                 run["font"] = latin.get("typeface")
@@ -258,9 +272,16 @@ def extract_slide(slide, slide_index: int) -> dict[str, Any] | None:
                     }
                 )
 
+        header_cell = hl.table.cell(0, 0)
+        header_paras = [
+            _para_metrics(p) for p in header_cell.text_frame._txBody.findall(qn("a:p"))
+        ]
+        header_metrics = header_paras[0] if header_paras else {}
+
         visual_lines = count_visual_lines_in_hl(hl)
         filled_count = len(filled)
         entry["highlights"] = {
+            "header_metrics": header_metrics,
             "position_in": {
                 "top": _emu_in(hl.top),
                 "height": _emu_in(hl.height),
@@ -300,6 +321,7 @@ def extract_slide(slide, slide_index: int) -> dict[str, Any] | None:
             ],
         }
         entry["ka_waste_below_text_in"] = ka_waste_below_text_in(ka)
+        entry["ka_rendered_text_bottom_in"] = ka_rendered_text_bottom_in(ka)
 
     if hl and ka:
         hl_bottom = hl.top + hl.height
@@ -310,12 +332,21 @@ def extract_slide(slide, slide_index: int) -> dict[str, Any] | None:
             layout = uds.get_g10x_layout_slide(g10x_prs, service)
             if layout is not None:
                 profile = uds.build_layout_profile(layout)
+                profile["canonical_fill_para_count"] = uds.get_canonical_fill_para_count(
+                    g10x_prs
+                )
+                profile["canonical_line_height_emu"] = uds.get_canonical_line_height_emu(
+                    g10x_prs
+                )
                 text_bottom = uds._hl_rendered_text_bottom(hl, profile)
-                fit_bottom = uds._hl_text_bottom_for_ka_fit(hl, profile)
                 entry["estimated_text_bottom_in"] = _emu_in(text_bottom)
-                entry["hl_text_bottom_for_fit_in"] = _emu_in(fit_bottom)
+                entry["hl_text_bottom_for_fit_in"] = _emu_in(text_bottom)
                 clearance = round((ka.top - text_bottom) / EMU_PER_INCH, 4)
                 entry["text_ka_clearance_in"] = clearance
+                hl_bottom = hl.top + hl.height
+                entry["hl_text_overflow_in"] = round(
+                    max((text_bottom - hl_bottom) / EMU_PER_INCH, 0), 4
+                )
         except Exception:  # noqa: BLE001
             ref_r2 = hl.table.rows[2].height
             est_bottom = rendered_text_bottom_emu(hl, ref_r2=ref_r2)
@@ -325,18 +356,23 @@ def extract_slide(slide, slide_index: int) -> dict[str, Any] | None:
                 entry["text_ka_clearance_in"] = clearance
 
     hl_metrics = entry.get("highlights")
-    if hl and hl_metrics:
+    if hl and hl_metrics and not entry.get("_rendered_bounds_deferred"):
         entry["hl_waste_below_text_in"] = _hl_waste_below_text_in(hl)
+        entry["hl_text_bounds_method"] = "estimated"
 
     ka_has_items = ka is not None and count_ka_items(ka) > 0
-    if hl and ka_has_items:
-        entry["layout_type"] = "hl_and_ka"
+    if hl and ka is not None:
+        entry["layout_type"] = (
+            "hl_and_ka" if not entry.get("is_contd") else "hl_only_contd"
+        )
     elif hl:
         entry["layout_type"] = (
             "hl_only_contd" if entry.get("is_contd") else "hl_only_main"
         )
-    elif ka_has_items:
-        entry["layout_type"] = "ka_only_contd"
+    elif ka is not None:
+        entry["layout_type"] = (
+            "ka_only_contd" if entry.get("is_contd") else "ka_only_main"
+        )
     else:
         entry["layout_type"] = "unknown"
 
@@ -363,16 +399,30 @@ def _bullet_distribution(paras: list[dict]) -> dict[str, int]:
     return dist
 
 
-def extract_deck(ppt_path: str | Path) -> dict[str, Any]:
+def extract_deck(
+    ppt_path: str | Path,
+    *,
+    use_rendered_bounds: bool = True,
+) -> dict[str, Any]:
     """Extract all delivery-status slides from the entire deck."""
+    ppt_path = Path(ppt_path)
     prs = Presentation(str(ppt_path))
     slides = []
     for i, slide in enumerate(prs.slides, start=1):
         data = extract_slide(slide, i)
         if data:
+            if use_rendered_bounds:
+                data["_rendered_bounds_deferred"] = True
             slides.append(data)
-    return {
-        "file": str(Path(ppt_path).name),
+    deck = {
+        "file": str(ppt_path.name),
         "slide_count": len(slides),
         "slides": slides,
     }
+    if use_rendered_bounds and slides:
+        from app.services.ppt_rendered_bounds import enrich_deck_rendered_hl_metrics
+
+        enrich_deck_rendered_hl_metrics(deck, ppt_path)
+        for slide_data in slides:
+            slide_data.pop("_rendered_bounds_deferred", None)
+    return deck

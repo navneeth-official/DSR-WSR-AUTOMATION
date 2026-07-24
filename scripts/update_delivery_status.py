@@ -7,7 +7,7 @@ G10X sustainment format (Supplier Core Services reference — slide 4):
 - Story order per sprint: completed, released, in-progress.
 - No blank line between category header and first story; one blank line between sprints.
 - Fill main slide to Supplier capacity (~20 paragraph slots) before HL (Contd...).
-- Key Activities only after Highlights finish; tight HL–KA gap (~0.15 in) when on same slide.
+- Key Activities only after Highlights finish; ~2 body lines between HL and KA tabs when on same slide.
 - ka_contd_only: dense HL on main, KA on KA-only (Contd...) when content exceeds KA zone.
 """
 
@@ -29,6 +29,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from app.services.sprint_display import sprint_dates_from_section
+from app.services.ppt_layout_metrics import hl_ka_tab_gap_emu, rendered_text_bottom_emu
 
 G10X = str(_REPO_ROOT / "templates" / "G10X H-E-B WSR Sustainment 05 June 2026 .pptx")
 OUTPUT = str(_REPO_ROOT / "output" / "HEB_Delivery_Status.pptx")
@@ -42,7 +43,6 @@ MIN_TEXT_KA_CLEARANCE = 137160  # ~0.15 in — minimum text-to-KA clearance (G10
 HL_KA_FILL_THRESHOLD = 0.85  # at or above this fraction of template capacity, use full HL box
 HL_OVERFLOW_SAFETY = 0  # fill to G10X mark before creating (Contd...)
 EMPTY_KA_CONTD_MAX_EMU = 320040  # ~0.35 in — header strip on KA-only (Contd...) slides
-HL_KA_FIXED_GAP = MIN_TEXT_KA_CLEARANCE  # fixed gap after HL table bottom → KA top (all services)
 HL_CONTENT_BOTTOM_PAD = 91440  # ~0.1 in below last text line inside HL table
 # G10X story-bucket order within each sprint (Supplier reference slide 4)
 STORY_BUCKET_ORDER = ("completed", "released", "inprogress")
@@ -944,15 +944,20 @@ def _calc_table_pad(count, ref_count, ref_pad, at_least=91440):
     return max(int(ref_pad * count / ref_count), at_least)
 
 
+def _hl_ka_tab_gap(profile):
+    """Gap between HL table bottom and KA table top (~2 canonical body lines)."""
+    return hl_ka_tab_gap_emu(profile.get("canonical_line_height_emu"))
+
+
 def _hl_ka_gap(profile):
-    """Legacy G10X shape-border overlap — not used for KA placement (see HL_KA_FIXED_GAP)."""
+    """Legacy G10X shape-border overlap — not used for KA placement (see _hl_ka_tab_gap)."""
     gap = profile.get("standard_gap")
     return MIN_HL_KA_GAP if gap is None else gap
 
 
-def _max_hl_height_before_ka(hl, ka_h):
+def _max_hl_height_before_ka(hl, ka_h, profile):
     """Legacy footer cap from HL top — prefer ka_fits_below_highlights after content-sized HL."""
-    return int(MAX_KA_BOTTOM_EMU - ka_h - hl.top - HL_KA_FIXED_GAP)
+    return int(MAX_KA_BOTTOM_EMU - ka_h - hl.top - _hl_ka_tab_gap(profile))
 
 
 def _normal_layout_cap(profile, budgets):
@@ -961,25 +966,25 @@ def _normal_layout_cap(profile, budgets):
 
 
 def _hl_text_bottom_for_ka(hl, profile):
-    """
-    Bottom of last HL text — anchor for KA placement (all services).
+    """Bottom of last HL text — same anchor as format evaluation (text_ka_clearance_in)."""
+    return _hl_rendered_text_bottom(hl, profile)
 
-    Sparse: wrap-aware text estimate only (table row height must not anchor KA).
-    Dense: also consider cell inner edge so wrapped overflow is not covered by KA.
-    """
-    est = _estimated_text_bottom(hl, profile)
-    if not _is_dense_hl(hl, profile):
-        return est
-    return max(
-        est,
-        _inner_content_bottom(hl),
-        hl.top + hl.height - HL_CONTENT_BOTTOM_PAD,
-    )
+
+def _ka_top_after_hl(hl, profile):
+    """KA top = HL table bottom + tab gap (same rule for every service)."""
+    return hl.top + int(hl.height or 0) + _hl_ka_tab_gap(profile)
+
+
+def _effective_ka_top(hl, profile):
+    """KA top: tab gap below HL table, but never above last HL text + clearance."""
+    tab_top = _ka_top_after_hl(hl, profile)
+    text_floor = _hl_rendered_text_bottom(hl, profile) + MIN_TEXT_KA_CLEARANCE
+    return max(tab_top, text_floor)
 
 
 def _ka_top_after_hl_text(hl, profile):
-    """KA top = last HL text line + fixed gap (same rule for every service)."""
-    return _hl_text_bottom_for_ka(hl, profile) + HL_KA_FIXED_GAP
+    """Legacy text-anchored KA top — prefer _ka_top_after_hl for tab-to-tab spacing."""
+    return _hl_text_bottom_for_ka(hl, profile) + _hl_ka_tab_gap(profile)
 
 
 def _hl_capacity_above_ka(profile, ka_item_count=0):
@@ -992,22 +997,25 @@ def _ensure_hl_table_fits_rendered_text(hl, profile, max_h=None):
     min_h = _min_hl_height_for_text(None, profile, hl=hl)
     if max_h is not None:
         min_h = min(min_h, max_h)
-    if int(hl.height or 0) >= min_h:
-        return int(hl.height)
+    target = max(int(hl.height or 0), min_h)
     r0, r1 = profile["r0"], profile["r1"]
     min_pad = max(int(profile["ref_pad"] * 0.15), 45720)
-    content_h = max(min_h - r0 - r1 - min_pad, profile["r0"])
-    _set_table_shape_height(hl, [r0, r1, content_h], min_h)
-    return min_h
+    for _ in range(4):
+        content_h = max(target - r0 - r1 - min_pad, profile["r0"])
+        _set_table_shape_height(hl, [r0, r1, content_h], target)
+        rendered_bottom = _hl_rendered_text_bottom(hl, profile)
+        needed = int(rendered_bottom - hl.top + HL_CONTENT_BOTTOM_PAD)
+        if needed <= target:
+            return target
+        target = needed
+        if max_h is not None:
+            target = min(target, max_h)
+    return target
 
 
 def _desired_ka_top(hl, profile):
-    """
-    KA top: fixed gap below the lower of rendered text and the HL table border.
-    """
-    below_text = _hl_text_bottom_for_ka(hl, profile) + HL_KA_FIXED_GAP
-    below_table = hl.top + hl.height + HL_KA_FIXED_GAP
-    return max(below_text, below_table)
+    """KA top: ~2 body lines below the Highlights table border (not text-anchored)."""
+    return _effective_ka_top(hl, profile)
 
 
 def _clamp_ka_top_to_footer(ka_h: int, desired_top: int) -> int:
@@ -1077,15 +1085,16 @@ def _hl_per_line_height_emu(profile):
     """
     Per-line EMU for wrap-aware HL text estimates.
 
-    Small-reference slides (e.g. Wentworth) divide ref_r2 by few story slots and
-    over-estimate line height; cap at the Supplier canonical line height.
+    Always anchor on the Supplier canonical story-line height when available.
+    Per-project ref_r2 / slot-count can be too large (Wentworth) or too small
+    (Location) relative to real wrapped rendering — both cause bad HL sizing.
     """
     ref_para_count = max(profile["ref_para_count"], 1)
     project_pll = profile["ref_r2"] / max(ref_para_count - 2, 1)
     canonical_pll = profile.get("canonical_line_height_emu")
     if canonical_pll is None:
         return project_pll
-    return min(project_pll, canonical_pll)
+    return canonical_pll
 
 
 def _estimated_text_bottom(hl, profile):
@@ -1115,16 +1124,9 @@ def _min_hl_height_for_text(para_count, profile, hl=None):
 
 
 def _hl_rendered_text_bottom(hl, profile):
-    """Wrap-aware bottom of visible Highlights text (G10X text-to-KA spacing anchor)."""
+    """Wrap-aware bottom of visible Highlights text (matches format evaluation)."""
     est = _estimated_text_bottom(hl, profile)
-    para_count = _count_hl_paragraphs(hl)
-    ref_filled = profile.get("canonical_fill_para_count")
-    if ref_filled is None:
-        return est
-    if para_count < ref_filled * HL_KA_FILL_THRESHOLD:
-        return est
     inner = _inner_content_bottom(hl)
-    # Never underestimate dense HL: wrapped text may extend below the cell inner edge.
     return max(est, inner)
 
 
@@ -1295,10 +1297,10 @@ def _valid_main_prefix(nr, ni, nc, raw):
 
 
 def _max_paras_fit_above_ka(profile, ka_item_count=0):
-    """Paragraphs that fit above on-slide KA (last HL text + gap + KA within footer)."""
+    """Paragraphs that fit above on-slide KA (HL table + tab gap + KA within footer)."""
     ka_h = _estimate_ka_table_height(profile, ka_item_count)
-    max_text_bottom = MAX_KA_BOTTOM_EMU - ka_h - HL_KA_FIXED_GAP
-    max_h = int(max_text_bottom - profile["ref_hl_top"])
+    gap = _hl_ka_tab_gap(profile)
+    max_h = int(MAX_KA_BOTTOM_EMU - ka_h - gap - profile["ref_hl_top"])
     cap = profile.get("ref_filled_para_count", profile["ref_para_count"])
     for n in range(cap, 1, -1):
         if _min_hl_height_for_text(n, profile) <= max_h:
@@ -1309,8 +1311,8 @@ def _max_paras_fit_above_ka(profile, ka_item_count=0):
 def _ka_anchored_hl_capacity(profile, ka_item_count=0):
     """Paragraph slots that fit above on-slide KA within the footer safe zone."""
     ka_h = _estimate_ka_table_height(profile, ka_item_count)
-    max_text_bottom = MAX_KA_BOTTOM_EMU - ka_h - HL_KA_FIXED_GAP
-    max_h = int(max_text_bottom - profile["ref_hl_top"])
+    gap = _hl_ka_tab_gap(profile)
+    max_h = int(MAX_KA_BOTTOM_EMU - ka_h - gap - profile["ref_hl_top"])
     r0, r1, pad = profile["r0"], profile["r1"], profile["ref_pad"]
     content_h = max(max_h - r0 - r1 - pad, profile["r0"])
     return _capacity_for_content_row(profile, content_h)
@@ -1341,8 +1343,7 @@ def ka_fits_below_highlights(hl, profile, ka_item_count=None, *, ka_profile=None
     if kp.get("ka_r0") is None and kp.get("ref_ka") is not None:
         kp = {**kp, **_ka_fields_from_ref(kp["ref_ka"], profile["ref_hl"])}
     ka_h = _estimate_ka_table_height(kp, ka_item_count)
-    ka_top = _ka_top_after_hl_text(hl, profile)
-    return ka_top + ka_h <= MAX_KA_BOTTOM_EMU
+    return _effective_ka_top(hl, profile) + ka_h <= MAX_KA_BOTTOM_EMU
 
 
 def apply_ka_on_main_slide(slide, profile, raw, g10x_prs, g10x_layout, budgets=None):
@@ -1360,6 +1361,7 @@ def apply_ka_on_main_slide(slide, profile, raw, g10x_prs, g10x_layout, budgets=N
         fit_highlights_table(hl, profile, layout_mode="expanded", budgets=budgets)
     else:
         _fit_hl_content_only(hl, profile)
+    _ensure_hl_table_fits_rendered_text(hl, profile)
 
     if not ka_fits_below_highlights(hl, profile, item_count, ka_profile=ka_profile):
         return False
@@ -1982,7 +1984,8 @@ def fit_contd_slide_layout(contd_slide, g10x_layout, g10x_prs=None, budgets=None
         ka.width = ref_ka.width
 
     ka_h = fit_key_activities_table(ka, ka_profile, position_ref=ref_ka)
-    max_hl_bottom = MAX_KA_BOTTOM_EMU - ka_h - HL_KA_FIXED_GAP
+    gap = _hl_ka_tab_gap(profile)
+    max_hl_bottom = MAX_KA_BOTTOM_EMU - ka_h - gap
     max_h = int(max_hl_bottom - ref_hl.top)
     min_h = profile["r0"] + profile["r1"] + profile["r0"]
     max_h = max(max_h, min_h)
@@ -2000,7 +2003,7 @@ def fit_contd_slide_layout(contd_slide, g10x_layout, g10x_prs=None, budgets=None
 
 def tighten_slide_hl_ka_spacing(slide, g10x_layout, g10x_prs, budgets=None, profile=None):
     """
-    Final pass: finalize HL size, then seat KA a fixed gap below the last HL text line.
+    Final pass: finalize HL size, then seat KA ~2 body lines below the HL table border.
     KA-only contd slides keep the Pharmacy reference block geometry (no HL on slide).
     """
     if profile is None:
@@ -2037,13 +2040,12 @@ def tighten_slide_hl_ka_spacing(slide, g10x_layout, g10x_prs, budgets=None, prof
         ka_profile = get_ka_layout_profile(g10x_prs, g10x_layout)
         ref_ka = ka_profile.get("ref_ka")
         ka_h_est = _estimate_ka_table_height(ka_profile, count_filled_ka_items(ka))
+        gap = _hl_ka_tab_gap(profile)
         max_hl_h = int(
-            MAX_KA_BOTTOM_EMU - ka_h_est - HL_KA_FIXED_GAP - profile["ref_hl_top"]
+            MAX_KA_BOTTOM_EMU - ka_h_est - gap - profile["ref_hl_top"]
         )
         if not _is_dense_hl(hl, profile):
-            _ensure_hl_table_fits_rendered_text(
-                hl, profile, max_h=profile["ref_hl_top"] + max_hl_h
-            )
+            _ensure_hl_table_fits_rendered_text(hl, profile)
         else:
             fit_highlights_table(
                 hl,
@@ -3431,7 +3433,6 @@ def main():
             section_tmpl,
             content,
         )
-        ensure_key_activities_tab(slide, g10x, g10x_layout, profile)
         ka_item_count = ka_layout_item_count(raw)
         hl_overflow_contd = layout_mode in ("hl_ka_contd", "supplier_contd")
 
@@ -3461,6 +3462,10 @@ def main():
                 ka_on_main = True
                 layout_mode = "ka_on_main"
                 remove_redundant_ka_only_contd(prs, raw["title"], slide_idx)
+            else:
+                main_ka = get_key_activities_shape(slide)
+                if main_ka:
+                    delete_shape(main_ka)
 
         if not ka_on_main:
             if layout_mode in ("normal", "expanded"):
@@ -3481,6 +3486,7 @@ def main():
         if not ka_on_main and contd_raw is None and not hl_overflow_contd:
             hl_shape = get_highlights_shape(slide)
             ka_profile = get_ka_layout_profile(g10x, g10x_layout)
+            _ensure_hl_table_fits_rendered_text(hl_shape, profile)
             if not ka_fits_below_highlights(
                 hl_shape, profile, ka_item_count, ka_profile=ka_profile
             ):
@@ -3513,7 +3519,7 @@ def main():
                 ensure_key_activities_tab(
                     prs.slides[ka_contd_idx], g10x, g10x_layout, profile
                 )
-        elif ka_contd_idx is None:
+        elif ka_contd_idx is None and layout_mode != "ka_on_main":
             ensure_key_activities_tab(slide, g10x, g10x_layout, profile)
 
         tighten_slide_hl_ka_spacing(

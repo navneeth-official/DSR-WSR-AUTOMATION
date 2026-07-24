@@ -159,6 +159,7 @@ def build_ppt_content(
     Full pipeline: fetch stories for WSR date range, ensure titles, return JSON.
 
     Sprint selection uses overlap against ``start_date``/``end_date`` (unchanged).
+    One snapshot per ``jira_key`` is chosen (latest in-range, else latest overall).
     Sprint dates on each slide are the full ``sprints`` table values, never clipped
     to the WSR window.
     """

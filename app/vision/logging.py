@@ -20,8 +20,9 @@ def configure_vision_logging(
     *,
     log_path: Path | None = None,
     level: int = logging.INFO,
+    console: bool = True,
 ) -> logging.Logger:
-    """Attach a file handler once; safe to call multiple times."""
+    """Attach handlers once; safe to call multiple times (first call wins)."""
     global _configured
     logger = get_vision_logger()
     logger.setLevel(level)
@@ -35,9 +36,10 @@ def configure_vision_logging(
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
 
-    stream = logging.StreamHandler()
-    stream.setFormatter(formatter)
-    logger.addHandler(stream)
+    if console:
+        stream = logging.StreamHandler()
+        stream.setFormatter(formatter)
+        logger.addHandler(stream)
 
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)

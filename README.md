@@ -160,6 +160,8 @@ python scripts/evaluate_ppt_format.py --ppt output/HEB_Delivery_Status.pptx --mo
 python scripts/evaluate_ppt_format.py --ppt output/HEB_Delivery_Status.pptx --mode full --vision
 ```
 
+Vision review flags: oversized HL box for sparse content, excessive HL–KA tab gap, overlap/clipping. It does **not** flag small KA tabs or empty space below KA on `(Contd…)` slides.
+
 **Reports** (saved by default under `output/`):
 
 - `HEB_Delivery_Status.format_eval.json`

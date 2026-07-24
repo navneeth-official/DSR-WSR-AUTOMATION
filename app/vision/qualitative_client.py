@@ -46,16 +46,21 @@ class QualitativeVisionClient:
         *,
         slide_number: int | None = None,
         title: str = "",
+        layout_context: dict | None = None,
     ) -> QualitativeSlideReview:
         image = Path(image_path).resolve()
         if not image.is_file():
             raise FileNotFoundError(f"Slide image not found: {image}")
 
+        context: dict = {"title": title, "review_mode": "qualitative"}
+        if layout_context:
+            context["layout_hints"] = layout_context
+
         user_content = build_user_content(
             image_path=image,
             template_image_path=None,
             slide_number=slide_number,
-            context={"title": title, "review_mode": "qualitative"},
+            context=context,
         )
         raw = self._call_with_retries(
             user_content,

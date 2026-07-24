@@ -1,4 +1,4 @@
-"""Parse qualitative vision JSON (no pixel measurements)."""
+"""Parse qualitative vision JSON (subjective visual quality only)."""
 
 from __future__ import annotations
 
@@ -19,6 +19,23 @@ def _coerce_confidence(value: Any) -> float | None:
     return None
 
 
+def _coerce_score(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return round(float(value), 1)
+    return None
+
+
+def _parse_category_scores(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, val in raw.items():
+        score = _coerce_score(val)
+        if score is not None:
+            out[str(key)] = score
+    return out
+
+
 def parse_qualitative_review(raw: dict[str, Any]) -> QualitativeSlideReview:
     issues_raw = raw.get("issues") or []
     issues: list[QualitativeIssue] = []
@@ -27,7 +44,7 @@ def parse_qualitative_review(raw: dict[str, Any]) -> QualitativeSlideReview:
             if not isinstance(entry, dict):
                 continue
             category = QualitativeCategory.from_raw(entry.get("category"))
-            if category == QualitativeCategory.NO_ISSUE:
+            if category is None or category == QualitativeCategory.NO_ISSUE:
                 continue
             issues.append(
                 QualitativeIssue(
@@ -53,11 +70,19 @@ def parse_qualitative_review(raw: dict[str, Any]) -> QualitativeSlideReview:
     else:
         status = ReviewStatus.OK
 
+    strengths_raw = raw.get("strengths") or []
+    strengths = tuple(
+        str(s) for s in strengths_raw if isinstance(s, str) and s.strip()
+    )
+
     return QualitativeSlideReview(
         slide_number=slide_number,
         status=status,
         overall_quality=str(raw.get("overall_quality") or "acceptable"),
         issues=tuple(issues),
+        visual_score=_coerce_score(raw.get("visual_score")),
+        category_scores=_parse_category_scores(raw.get("category_scores")),
+        strengths=strengths,
     )
 
 

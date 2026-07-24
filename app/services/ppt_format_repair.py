@@ -13,7 +13,7 @@ from pptx import Presentation
 from pptx.oxml.ns import qn
 
 from app.services.ppt_format_fix_planner import ALLOWED_ACTIONS
-from app.services.ppt_layout_metrics import EMU_PER_INCH
+from app.services.ppt_layout_metrics import EMU_PER_INCH, hl_ka_tab_gap_emu
 
 from app.paths import G10X_TEMPLATE, PPT_BUILDER, REPO_ROOT, SCRIPTS_DIR
 SPARSE_WASTE_FORCE_TIGHT_IN = 0.5
@@ -30,8 +30,8 @@ def _ensure_text_clearance(hl, ka, profile, uds) -> bool:
     max_h = None
     if ka is not None:
         ka_h = ka.height or uds._estimate_ka_table_height(profile, 0)
-        max_text_bottom = uds.MAX_KA_BOTTOM_EMU - ka_h - uds.HL_KA_FIXED_GAP
-        max_h = int(max_text_bottom - hl.top)
+        gap = hl_ka_tab_gap_emu(profile.get("canonical_line_height_emu"))
+        max_h = int(uds.MAX_KA_BOTTOM_EMU - ka_h - gap - hl.top)
 
     uds._fit_hl_content_only(hl, profile, max_h=max_h)
     return True
@@ -256,7 +256,7 @@ def tighten_hl_and_position_ka(slide, uds, g10x_prs) -> bool:
             text_bottom = uds._hl_rendered_text_bottom(hl, profile)
             changed = True
 
-    pad = uds.HL_KA_FIXED_GAP
+    pad = uds.HL_CONTENT_BOTTOM_PAD
     target_bottom = text_bottom + pad
     current_bottom = hl.top + hl.height
     waste_in = (current_bottom - text_bottom) / EMU_PER_INCH
@@ -317,8 +317,8 @@ def fix_ka_footer_overflow(slide, uds, g10x_prs) -> bool:
     ka_h = uds.fit_key_activities_table(ka, ka_profile, position_ref=ref_ka)
     max_top = max(0, uds.MAX_KA_BOTTOM_EMU - ka_h)
     if hl:
-        text_bottom = uds._hl_rendered_text_bottom(hl, profile)
-        min_top = text_bottom + uds.HL_KA_FIXED_GAP
+        gap = hl_ka_tab_gap_emu(profile.get("canonical_line_height_emu"))
+        min_top = hl.top + hl.height + gap
         new_top = max(min_top, min(ka.top, max_top))
     else:
         new_top = max_top
