@@ -19,6 +19,47 @@ def _slide_title(slide) -> str:
     return ""
 
 
+def list_all_slide_indices(ppt_path: str | Path) -> list[dict[str, Any]]:
+    """Return every slide in the deck (1-based index + best-effort title)."""
+    prs = Presentation(str(ppt_path))
+    out: list[dict[str, Any]] = []
+    for i, slide in enumerate(prs.slides, start=1):
+        title = _slide_title(slide)
+        if not title:
+            title = _first_text_on_slide(slide) or f"Slide {i}"
+        out.append({"slide_index": i, "title": title})
+    return out
+
+
+def _first_text_on_slide(slide) -> str:
+    for sh in slide.shapes:
+        if sh.has_text_frame:
+            text = sh.text_frame.text.strip()
+            if text:
+                first_line = text.splitlines()[0].strip()
+                if first_line:
+                    return first_line[:120]
+    return ""
+
+
+def export_all_slides_to_png(
+    ppt_path: str | Path,
+    output_dir: str | Path,
+    *,
+    width_px: int = 1280,
+) -> list[dict[str, Any]]:
+    """Export every slide in the deck to PNG (Windows COM)."""
+    ppt_path = Path(ppt_path).resolve()
+    output_dir = Path(output_dir)
+    indices = [s["slide_index"] for s in list_all_slide_indices(ppt_path)]
+    return export_slides_to_png(
+        ppt_path,
+        output_dir,
+        slide_indices=indices,
+        width_px=width_px,
+    )
+
+
 def list_delivery_slide_indices(ppt_path: str | Path) -> list[dict[str, Any]]:
     """Return physical slide indices (1-based) for Delivery status slides."""
     prs = Presentation(str(ppt_path))

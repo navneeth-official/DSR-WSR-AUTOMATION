@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from app.services.ppt_format_evaluator import load_rulebook
-from app.services.title_generator import create_llm_client
+from app.config import llm_configured
+from app.services.llm_client import complete_text
 
 ALLOWED_ACTIONS = frozenset({
     "reflow_hl_ka",
@@ -219,8 +220,7 @@ def plan_fixes(
     rulebook = load_rulebook(rulebook_path)
     repair = rulebook.get("repair_instructions", {})
 
-    client, model = create_llm_client()
-    if client is None:
+    if not llm_configured():
         return _deterministic_fallback(violations)
 
     user_payload = {
@@ -231,18 +231,13 @@ def plan_fixes(
         "task": "Return FixPlan JSON per output_schema. Only whitelisted actions.",
     }
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-        ],
+    raw = complete_text(
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=json.dumps(user_payload, ensure_ascii=False),
         temperature=0.1,
-        response_format={"type": "json_object"},
+        json_mode=True,
     )
-
-    raw = response.choices[0].message.content or "{}"
-    plan = json.loads(raw)
+    plan = json.loads(raw or "{}")
     validated = [
         f for f in (_validate_fix(x) for x in plan.get("fixes", [])) if f is not None
     ]

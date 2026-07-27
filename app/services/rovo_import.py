@@ -26,7 +26,9 @@ def map_rovo_item_to_story_fields(item: dict) -> dict:
         "created_date": _parse_date(item.get("created_date")),
         "updated_date": _parse_date(item.get("updated_date")),
         "resolved_date": _parse_date(item.get("resolved_date")),
-        "snapshot_date": _parse_date(item.get("snapshot_date")),
+        "snapshot_date": _parse_date(item.get("snapshot_date"))
+        or _parse_date(item.get("updated_date"))
+        or date.today(),
         "title": None,
         "completion": _infer_completion(status),
     }
@@ -41,7 +43,8 @@ def import_rovo_payload(
 
     for item in payload:
         fields = map_rovo_item_to_story_fields(item)
-        repo.upsert(**fields)
+        story = repo.upsert(**fields)
+        repo.persist_generated_title(story)
         imported_keys.append(fields["jira_key"])
 
     return imported_keys
@@ -61,3 +64,7 @@ def _infer_completion(status: str) -> Decimal | None:
     if normalized in {"in progress", "in review", "in development"}:
         return Decimal("50")
     return Decimal("0")
+
+
+def infer_completion(status: str) -> Decimal | None:
+    return _infer_completion(status)

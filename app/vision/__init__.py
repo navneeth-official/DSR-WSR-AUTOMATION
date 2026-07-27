@@ -9,7 +9,7 @@ from app.vision.exceptions import (
     VisionTimeoutError,
 )
 from app.vision.parser import extract_json_object, parse_slide_evaluation
-from app.vision.transport import OpenAIVisionTransport, VisionModelTransport
+from app.vision.transport import GeminiVisionTransport, OpenAIVisionTransport, VisionModelTransport
 from app.vision.types import (
     LayoutIssue,
     RecommendedAction,
@@ -21,6 +21,7 @@ from app.vision.types import (
 __all__ = [
     "LayoutIssue",
     "MalformedVisionResponseError",
+    "GeminiVisionTransport",
     "OpenAIVisionTransport",
     "RecommendedAction",
     "SlideEvaluationResult",

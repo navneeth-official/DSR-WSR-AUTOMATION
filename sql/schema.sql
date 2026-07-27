@@ -13,12 +13,14 @@ CREATE INDEX IF NOT EXISTS ix_projects_project_key ON projects (project_key);
 
 CREATE TABLE IF NOT EXISTS sprints (
     sprint_id           SERIAL        PRIMARY KEY,
-    sprint_name         VARCHAR(200)  NOT NULL UNIQUE,
+    project_id          INTEGER       NOT NULL REFERENCES projects (project_id) ON DELETE CASCADE,
+    sprint_name         VARCHAR(200)  NOT NULL,
     sprint_status       VARCHAR(50)   NOT NULL DEFAULT 'inprogress',
     sprint_start_date   DATE,
     sprint_end_date     DATE,
     created_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    updated_at          TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_sprints_project_name UNIQUE (project_id, sprint_name)
 );
 
 CREATE INDEX IF NOT EXISTS ix_sprints_sprint_name ON sprints (sprint_name);

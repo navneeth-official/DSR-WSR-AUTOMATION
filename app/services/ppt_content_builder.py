@@ -16,7 +16,26 @@ from app.constants.ppt_mapping import (
 from app.models.jira_story import JiraStory
 from app.repositories.jira_story_repository import JiraStoryRepository
 from app.services.sprint_display import format_sprint_dates_for_display
-from app.services.title_generator import ensure_story_titles
+
+
+def _ppt_story_line(story: JiraStory) -> str:
+    """Use the persisted DB title; fall back to summary only for the slide (no LLM)."""
+    title = (story.title or "").strip()
+    if title:
+        return title
+    return (story.summary or "").strip()
+
+
+def _title_usage_stats(stories: list[JiraStory]) -> tuple[int, int]:
+    """Return (titles_from_db, titles_fallback_summary)."""
+    from_db = 0
+    fallback = 0
+    for story in stories:
+        if (story.title or "").strip():
+            from_db += 1
+        else:
+            fallback += 1
+    return from_db, fallback
 
 
 def ppt_slide_title(project_key: str, project_name: str) -> str:
@@ -67,7 +86,7 @@ def build_slide_chunks(
         completed: list[str] = []
 
         for story in sorted(group_stories, key=lambda s: s.jira_key):
-            title = (story.title or story.summary).strip()
+            title = _ppt_story_line(story)
             bucket = _bucket_story(story.status)
             if bucket == "released":
                 released.append(title)
@@ -151,12 +170,14 @@ def build_ppt_content(
     *,
     start_date: date,
     end_date: date,
-    save_titles: bool = False,
     merge_titles: bool = True,
-    regenerate_titles: bool = False,
 ) -> dict[str, Any]:
     """
-    Full pipeline: fetch stories for WSR date range, ensure titles, return JSON.
+    Full pipeline: fetch stories for WSR date range and return JSON for PPT build.
+
+    Story bullet text uses ``jira_stories.title`` from the database. Titles are
+    expected to be created during intake; missing titles fall back to summary on
+    the slide only (no LLM calls during WSR generation).
 
     Sprint selection uses overlap against ``start_date``/``end_date`` (unchanged).
     One snapshot per ``jira_key`` is chosen (latest in-range, else latest overall).
@@ -175,14 +196,7 @@ def build_ppt_content(
             f"No stories found for report period {start_date} to {end_date}."
         )
 
-    generated, reused = ensure_story_titles(
-        stories,
-        save=save_titles,
-        db=db,
-        regenerate=regenerate_titles,
-    )
-    if save_titles:
-        db.commit()
+    titles_from_db, titles_fallback_summary = _title_usage_stats(stories)
 
     chunks = build_slide_chunks(stories)
     if merge_titles:
@@ -197,7 +211,10 @@ def build_ppt_content(
         "meta": {
             "story_count": len(stories),
             "slide_count": len(slides),
-            "titles_generated": generated,
-            "titles_reused": reused,
+            "titles_from_db": titles_from_db,
+            "titles_fallback_summary": titles_fallback_summary,
+            # Backward-compatible aliases (no LLM title generation in WSR path).
+            "titles_generated": 0,
+            "titles_reused": titles_from_db,
         },
     }

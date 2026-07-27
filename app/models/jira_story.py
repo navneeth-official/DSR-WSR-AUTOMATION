@@ -13,11 +13,12 @@ if TYPE_CHECKING:
 
 
 class JiraStory(Base):
-    """Stores Jira story details synced from Rovo AI for DSR/WSR report generation."""
+    """Stores Jira story snapshots synced from Rovo AI for DSR/WSR reporting."""
 
     __tablename__ = "jira_stories"
 
     jira_key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True)
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.project_id", ondelete="RESTRICT"),
         nullable=False,
@@ -52,7 +53,6 @@ class JiraStory(Base):
     created_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     updated_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     resolved_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    snapshot_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -69,4 +69,7 @@ class JiraStory(Base):
     sprint: Mapped["Sprint | None"] = relationship(back_populates="stories")
 
     def __repr__(self) -> str:
-        return f"<JiraStory(jira_key={self.jira_key!r}, status={self.status!r})>"
+        return (
+            f"<JiraStory(jira_key={self.jira_key!r}, "
+            f"snapshot_date={self.snapshot_date!r}, status={self.status!r})>"
+        )

@@ -1,4 +1,4 @@
-"""AI-powered PPT format evaluation against G10X rulebook using Azure OpenAI.
+"""AI-powered PPT format evaluation against G10X rulebook using configured LLM.
 
 .. deprecated::
     v2.0 hybrid architecture uses deterministic code for all measurable layout
@@ -16,7 +16,8 @@ from typing import Any
 
 from app.services.ppt_format_extractor import extract_deck
 from app.services.ppt_format_violations import compute_service_chains
-from app.services.title_generator import create_llm_client
+from app.config import llm_configured
+from app.services.llm_client import complete_text
 
 RULEBOOK_PATH = Path(__file__).resolve().parents[1] / "constants" / "ppt_format_rulebook.json"
 
@@ -110,7 +111,7 @@ def evaluate_deck_format(
     rulebook_path: Path | None = None,
 ) -> dict[str, Any]:
     """
-    Extract deck metrics and call Azure OpenAI for format scoring.
+    Extract deck metrics and call the configured LLM for format scoring.
     Returns evaluation JSON with deck_score, deck_pass, per-slide scores.
 
     .. deprecated:: Use ``evaluate_ppt_format(mode='full')`` for hybrid evaluation.
@@ -133,26 +134,21 @@ def evaluate_deck_format(
             "critical_issues": ["No slides matching 'Delivery status' title pattern."],
         }
 
-    client, model = create_llm_client()
-    if client is None:
+    if not llm_configured():
         raise RuntimeError(
-            "Azure OpenAI not configured. Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in .env"
+            "LLM not configured. Set GEMINI_API_KEY, or AZURE_OPENAI_ENDPOINT "
+            "and AZURE_OPENAI_API_KEY, or OPENAI_API_KEY in .env"
         )
 
     user_prompt = _build_user_prompt(rulebook, deck_data)
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
+    raw = complete_text(
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=user_prompt,
         temperature=0.1,
-        response_format={"type": "json_object"},
+        json_mode=True,
     )
-
-    raw = response.choices[0].message.content or "{}"
-    result = json.loads(raw)
+    result = json.loads(raw or "{}")
 
     # Attach extraction snapshot for traceability
     result["source_file"] = deck_data["file"]

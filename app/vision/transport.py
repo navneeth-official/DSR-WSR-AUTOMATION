@@ -28,6 +28,28 @@ class VisionModelTransport(Protocol):
 
 
 @dataclass(frozen=True)
+class GeminiVisionTransport:
+    """Google Gemini vision transport via unified llm_client."""
+
+    def complete_json(
+        self,
+        *,
+        system_prompt: str,
+        user_content: list[dict[str, Any]],
+        temperature: float,
+        timeout_s: float,
+    ) -> str:
+        from app.services.llm_client import complete_vision_json
+
+        return complete_vision_json(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            temperature=temperature,
+            timeout_s=timeout_s,
+        )
+
+
+@dataclass(frozen=True)
 class OpenAIVisionTransport:
     """OpenAI / Azure OpenAI chat completions transport."""
 

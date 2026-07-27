@@ -33,7 +33,7 @@ def main() -> None:
     db = SessionLocal()
     try:
         repo = JiraStoryRepository(db)
-        stories = repo.get_all()
+        stories = repo.get_all_latest()
         missing = [s for s in stories if not (s.title and s.title.strip())]
 
         if not missing:

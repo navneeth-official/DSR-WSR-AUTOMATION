@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,29 @@ DEFAULT_CONTENT_JSON = OUTPUT_DIR / "ppt_content.json"
 DEFAULT_CONTENT_PREVIEW = OUTPUT_DIR / "ppt_content_preview.txt"
 DEFAULT_PPT_OUTPUT = OUTPUT_DIR / "HEB_Delivery_Status.pptx"
 GEOMETRY_DEBUG_LOG = OUTPUT_DIR / "layout_geometry_debug.log"
+
+
+class WsrOutputPaths:
+    def __init__(self, json_path: Path, preview_path: Path, ppt_path: Path) -> None:
+        self.json_path = json_path
+        self.preview_path = preview_path
+        self.ppt_path = ppt_path
+
+
+def wsr_output_paths(start_date: date, end_date: date) -> WsrOutputPaths:
+    """Per-week output files under output/."""
+    stem = f"WSR_{start_date.isoformat()}_{end_date.isoformat()}"
+    return WsrOutputPaths(
+        json_path=OUTPUT_DIR / f"{stem}.json",
+        preview_path=OUTPUT_DIR / f"{stem}_preview.txt",
+        ppt_path=OUTPUT_DIR / f"{stem}.pptx",
+    )
+
+
+def wsr_preview_dir(start_date: date, end_date: date) -> Path:
+    """Directory for rendered PNG previews of a WSR deck."""
+    stem = f"WSR_{start_date.isoformat()}_{end_date.isoformat()}"
+    return OUTPUT_DIR / f"{stem}_slides"
 
 
 def ensure_output_dir() -> Path:

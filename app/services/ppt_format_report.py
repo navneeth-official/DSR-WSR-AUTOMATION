@@ -24,7 +24,7 @@ from app.services.ppt_visual_scoring import (
     compute_deck_visual_score,
     compute_visual_score_result,
 )
-from app.services.title_generator import create_llm_client
+from app.config import llm_configured
 from app.vision.cross_slide_hl import (
     supplement_contd_hl_waste_issues,
     supplement_continuation_suggestions,
@@ -449,10 +449,9 @@ def evaluate_ppt_format(
         errors.append(
             "Mode 'ai' is deprecated — use 'full' for hybrid deterministic + visual review."
         )
-        client, _model = create_llm_client()
-        if client is None:
+        if not llm_configured():
             errors.append(
-                "Azure/OpenAI not configured — skipped legacy AI rulebook evaluation."
+                "LLM not configured — skipped legacy AI rulebook evaluation."
             )
             raise RuntimeError(errors[-1])
         try:

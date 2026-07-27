@@ -8,6 +8,7 @@ from app.database import Base
 
 if TYPE_CHECKING:
     from app.models.jira_story import JiraStory
+    from app.models.sprint import Sprint
 
 
 class Project(Base):
@@ -32,6 +33,7 @@ class Project(Base):
     )
 
     stories: Mapped[list["JiraStory"]] = relationship(back_populates="project")
+    sprints: Mapped[list["Sprint"]] = relationship(back_populates="project")
 
     def __repr__(self) -> str:
         return f"<Project(id={self.project_id}, key={self.project_key!r})>"

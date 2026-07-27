@@ -20,16 +20,29 @@ class Settings:
     postgres_port: str = os.getenv("POSTGRES_PORT", "5432")
     postgres_db: str = os.getenv("POSTGRES_DB", "dsr_wsr_db")
 
-    # Standard OpenAI (optional)
-    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    # Google AI Studio Gemini (primary when GEMINI_API_KEY is set)
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+    gemini_vision_model: str = os.getenv(
+        "GEMINI_VISION_MODEL", "gemini-3.5-flash-lite"
+    )
+    llm_provider: str = os.getenv("LLM_PROVIDER", "auto")
+    wsr_llm_max_calls_per_minute: int = int(
+        os.getenv("WSR_LLM_MAX_CALLS_PER_MINUTE", "10")
+    )
 
-    # Azure OpenAI (preferred when set — used for story title generation)
+    # Standard OpenAI (optional fallback)
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    openai_vision_model: str = os.getenv("OPENAI_VISION_MODEL", "")
+
+    # Azure OpenAI (optional fallback)
     azure_openai_endpoint: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")
     azure_openai_api_key: str = os.getenv("AZURE_OPENAI_API_KEY", "")
     azure_openai_api_version: str = os.getenv(
         "AZURE_OPENAI_API_VERSION", "2024-02-15-preview"
     )
     azure_openai_model: str = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini")
+    azure_openai_vision_model: str = os.getenv("AZURE_OPENAI_VISION_MODEL", "")
 
 
 @lru_cache
@@ -37,9 +50,32 @@ def get_settings() -> Settings:
     return Settings()
 
 
-def llm_configured(settings: Settings | None = None) -> bool:
-    """True when Azure OpenAI or standard OpenAI credentials are present."""
+def resolve_llm_provider(settings: Settings | None = None) -> str:
+    """Return active LLM provider: gemini, azure, openai, or none."""
     s = settings or get_settings()
-    if s.azure_openai_endpoint and s.azure_openai_api_key:
-        return True
-    return bool(s.openai_api_key)
+    preference = (s.llm_provider or "auto").lower()
+
+    has_gemini = bool(s.gemini_api_key)
+    has_azure = bool(s.azure_openai_endpoint and s.azure_openai_api_key)
+    has_openai = bool(s.openai_api_key)
+
+    if preference == "gemini":
+        return "gemini" if has_gemini else "none"
+    if preference == "azure":
+        return "azure" if has_azure else "none"
+    if preference == "openai":
+        return "openai" if has_openai else "none"
+
+    # auto: prefer Gemini, then Azure, then OpenAI
+    if has_gemini:
+        return "gemini"
+    if has_azure:
+        return "azure"
+    if has_openai:
+        return "openai"
+    return "none"
+
+
+def llm_configured(settings: Settings | None = None) -> bool:
+    """True when any supported LLM provider is configured."""
+    return resolve_llm_provider(settings) != "none"

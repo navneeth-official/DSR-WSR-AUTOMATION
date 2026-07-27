@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.services.title_generator import create_llm_client
+from app.config import llm_configured, resolve_llm_provider
+from app.services.llm_client import create_openai_client, resolve_vision_model
 from app.vision.exceptions import (
     MalformedVisionResponseError,
     VisionConfigurationError,
@@ -24,6 +25,7 @@ from app.vision.logging import (
 )
 from app.vision.parser import extract_json_object, parse_slide_evaluation
 from app.vision.transport import (
+    GeminiVisionTransport,
     OpenAIVisionTransport,
     VisionModelTransport,
     build_user_content,
@@ -35,14 +37,9 @@ DEFAULT_VISION_MODEL = "gpt-4o"
 
 
 def _resolve_vision_model(configured: str | None) -> str:
-    if configured:
+    if configured and configured != DEFAULT_VISION_MODEL:
         return configured
-    return (
-        os.getenv("AZURE_OPENAI_VISION_MODEL")
-        or os.getenv("OPENAI_VISION_MODEL")
-        or os.getenv("AZURE_OPENAI_MODEL")
-        or DEFAULT_VISION_MODEL
-    )
+    return resolve_vision_model()
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -140,13 +137,25 @@ class VisionClient:
         return parse_slide_evaluation(raw_json)
 
     def _build_default_transport(self) -> VisionModelTransport:
-        client, deployment = create_llm_client()
+        if not llm_configured():
+            raise VisionConfigurationError(
+                "LLM not configured. Set GEMINI_API_KEY, or AZURE_OPENAI_ENDPOINT + "
+                "AZURE_OPENAI_API_KEY, or OPENAI_API_KEY in .env"
+            )
+
+        provider = resolve_llm_provider()
+        self._model_name = resolve_vision_model()
+
+        if provider == "gemini":
+            return GeminiVisionTransport()
+
+        client, deployment = create_openai_client()
         if client is None:
             raise VisionConfigurationError(
-                "LLM not configured. Set AZURE_OPENAI_ENDPOINT + "
-                "AZURE_OPENAI_API_KEY or OPENAI_API_KEY in .env"
+                "LLM not configured. Set GEMINI_API_KEY, or AZURE_OPENAI_ENDPOINT + "
+                "AZURE_OPENAI_API_KEY, or OPENAI_API_KEY in .env"
             )
-        # Azure uses deployment name; prefer explicit vision model when set.
+
         model = self._model_name
         if (
             os.getenv("AZURE_OPENAI_ENDPOINT")

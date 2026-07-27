@@ -3,9 +3,7 @@ Generate PPT delivery-status content from PostgreSQL and optionally build the de
 
 Usage:
     python scripts/generate_ppt_content.py --start-date 2026-06-09 --end-date 2026-06-13
-    python scripts/generate_ppt_content.py --start-date 2026-06-09 --end-date 2026-06-13 --save-titles
     python scripts/generate_ppt_content.py --start-date 2026-06-09 --end-date 2026-06-13 --json-only
-    python scripts/generate_ppt_content.py --start-date 2026-06-09 --end-date 2026-06-13 --regenerate-titles
 """
 
 from __future__ import annotations
@@ -96,16 +94,6 @@ def main() -> None:
         help=f"Output PowerPoint path (default: {DEFAULT_PPT.name})",
     )
     parser.add_argument(
-        "--save-titles",
-        action="store_true",
-        help="Persist generated titles to jira_stories.title",
-    )
-    parser.add_argument(
-        "--regenerate-titles",
-        action="store_true",
-        help="Re-call GPT even when title already exists in DB",
-    )
-    parser.add_argument(
         "--no-merge-titles",
         action="store_true",
         help="Keep separate chunks per project/sprint (do not merge by slide title)",
@@ -169,9 +157,7 @@ def main() -> None:
             db,
             start_date=start_date,
             end_date=end_date,
-            save_titles=args.save_titles,
             merge_titles=not args.no_merge_titles,
-            regenerate_titles=args.regenerate_titles,
         )
     except ValueError as exc:
         print(f"Error: {exc}")
@@ -199,12 +185,8 @@ def main() -> None:
     print(f"  report period: {content['report_start_date']} – {content['report_end_date']}")
     print(f"  stories:       {meta['story_count']}")
     print(f"  slides:        {meta['slide_count']}")
-    print(f"  titles new:    {meta['titles_generated']}")
-    print(f"  titles reused: {meta['titles_reused']}")
-    if meta["titles_reused"] and not args.regenerate_titles:
-        print(
-            "  (titles already in DB — use --regenerate-titles to call GPT again)"
-        )
+    print(f"  titles from DB: {meta.get('titles_from_db', meta.get('titles_reused', 0))}")
+    print(f"  summary fallback: {meta.get('titles_fallback_summary', 0)}")
     for slide in content["slides"]:
         sections = slide.get("sections") or [slide]
         n = sum(
