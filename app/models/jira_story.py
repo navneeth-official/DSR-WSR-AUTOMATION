@@ -53,6 +53,11 @@ class JiraStory(Base):
     created_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     updated_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     resolved_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    comment: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Optional developer note editable from the frontend",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from app.repositories.jira_story_repository import JiraStoryRepository
+from app.utils.date_parse import parse_flexible_date
 
 
 def map_rovo_item_to_story_fields(item: dict) -> dict:
@@ -51,9 +52,7 @@ def import_rovo_payload(
 
 
 def _parse_date(value: str | None) -> date | None:
-    if not value:
-        return None
-    return date.fromisoformat(value)
+    return parse_flexible_date(value)
 
 
 def _infer_completion(status: str) -> Decimal | None:

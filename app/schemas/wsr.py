@@ -7,10 +7,24 @@ from pydantic import BaseModel, Field
 class WsrGenerateRequest(BaseModel):
     start_date: date = Field(description="WSR report period start (Monday, inclusive)")
     end_date: date = Field(description="WSR report period end (Friday, inclusive)")
+    template_id: str = Field(
+        description="Saved WSR template id from POST /api/wsr/template/upload or /save",
+    )
     force: bool = Field(
         default=False,
         description="Start a new background job even if one is already running",
     )
+
+
+class WsrGenerationCheckResponse(BaseModel):
+    can_generate: bool
+    reason: Literal["new_week", "different_template", "same_template"]
+    variant: int = 1
+    variant_label: str = "WSR"
+    template_id: str | None = None
+    template_name: str | None = None
+    message: str
+    existing_variants: list[dict] = Field(default_factory=list)
 
 
 class WsrJobStartResponse(BaseModel):
@@ -42,6 +56,10 @@ class WsrMeta(BaseModel):
 class WsrWeekSummary(BaseModel):
     report_start_date: date
     report_end_date: date
+    variant: int = 1
+    variant_label: str = "WSR"
+    template_id: str | None = None
+    template_name: str | None = None
     filename: str
     generated_at: datetime
     story_count: int = 0
@@ -78,6 +96,38 @@ class WsrPreviewSlide(BaseModel):
     image_url: str
 
 
+class WsrTemplateInfoResponse(BaseModel):
+    filename: str
+    original_filename: str
+    uploaded_at: str
+    slide_count: int
+    file_size_bytes: int
+
+
+class WsrTemplateItemResponse(BaseModel):
+    id: str
+    filename: str
+    original_filename: str
+    updated_at: str
+    slide_count: int
+    file_size_bytes: int
+    is_draft: bool = False
+    thumbnail_url: str
+
+
+class WsrTemplateListResponse(BaseModel):
+    templates: list[WsrTemplateItemResponse] = Field(default_factory=list)
+    draft: WsrTemplateItemResponse | None = None
+
+
+class WsrTemplateUploadResponse(WsrTemplateInfoResponse):
+    preview_slides: list[WsrPreviewSlide] = Field(default_factory=list)
+
+
+class WsrTemplateStageResponse(WsrTemplateItemResponse):
+    preview_slides: list[WsrPreviewSlide] = Field(default_factory=list)
+
+
 class WsrGenerateResponse(BaseModel):
     report_start_date: date
     report_end_date: date
@@ -87,6 +137,11 @@ class WsrGenerateResponse(BaseModel):
     download_url: str
     slides: list[WsrContentSlide]
     preview_slides: list[WsrPreviewSlide] = Field(default_factory=list)
+    onedrive_web_url: str | None = None
+    variant: int = 1
+    variant_label: str = "WSR"
+    template_id: str | None = None
+    template_name: str | None = None
 
 
 WsrStatusResponse.model_rebuild()

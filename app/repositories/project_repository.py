@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.constants.projects import CANONICAL_PROJECT_KEYS
@@ -28,9 +28,54 @@ class ProjectRepository:
         stmt = select(Project).where(Project.project_key == project_key)
         return self.db.scalars(stmt).first()
 
+    def get_by_key_ci(self, project_key: str) -> Project | None:
+        normalized = project_key.strip()
+        if not normalized:
+            return None
+        stmt = select(Project).where(func.lower(Project.project_key) == normalized.lower())
+        return self.db.scalars(stmt).first()
+
+    def get_by_name_ci(self, project_name: str) -> Project | None:
+        normalized = project_name.strip()
+        if not normalized:
+            return None
+        stmt = select(Project).where(func.lower(Project.project_name) == normalized.lower())
+        return self.db.scalars(stmt).first()
+
     def get_all(self) -> list[Project]:
         stmt = select(Project).order_by(Project.project_name)
         return list(self.db.scalars(stmt).all())
+
+    def get_all_active(self) -> list[Project]:
+        stmt = (
+            select(Project)
+            .where(Project.is_active.is_(True))
+            .order_by(Project.project_name)
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def set_is_active(self, project_id: int, is_active: bool) -> None:
+        project = self.get_by_id(project_id)
+        if project is not None:
+            project.is_active = is_active
+            self.db.commit()
+
+    def create(
+        self,
+        *,
+        project_key: str,
+        project_name: str,
+        is_active: bool = True,
+    ) -> Project:
+        project = Project(
+            project_key=project_key,
+            project_name=project_name,
+            is_active=is_active,
+        )
+        self.db.add(project)
+        self.db.commit()
+        self.db.refresh(project)
+        return project
 
     def get_or_create(
         self,

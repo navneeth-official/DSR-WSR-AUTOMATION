@@ -1,7 +1,12 @@
 from datetime import date
 from decimal import Decimal
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+
+from app.utils.date_parse import parse_flexible_date
+
+FlexibleDate = Annotated[date | None, BeforeValidator(parse_flexible_date)]
 
 
 class JiraStorySaveRequest(BaseModel):
@@ -11,21 +16,25 @@ class JiraStorySaveRequest(BaseModel):
     summary: str = Field(description="Summary")
     track: str = Field(description="Track project key or name, e.g. LOC or LOCO")
     sprint: str | None = Field(default=None, description="Sprint name")
-    sprint_start_date: date | None = None
-    sprint_end_date: date | None = None
-    date_assigned: date | None = Field(default=None, description="Date Assigned")
+    sprint_start_date: FlexibleDate = None
+    sprint_end_date: FlexibleDate = None
+    date_assigned: FlexibleDate = Field(default=None, description="Date Assigned")
     status: str = Field(description="Status")
     story_points: Decimal | None = Field(default=None, description="Story Points")
     percent_complete: Decimal | None = Field(default=None, description="% Complete")
     assignee: str | None = Field(default=None, description="Assignee")
     reportee: str | None = Field(default=None, description="Reportee")
+    comment: str | None = Field(
+        default=None,
+        description="Optional developer comment; omit from request to leave unchanged on update",
+    )
     title: str | None = None
     description: str | None = None
     issue_type: str | None = None
     priority: str | None = None
-    updated_date: date | None = None
-    resolved_date: date | None = None
-    snapshot_date: date | None = None
+    updated_date: FlexibleDate = None
+    resolved_date: FlexibleDate = None
+    snapshot_date: FlexibleDate = None
 
 
 # POST /api/stories uses the same body shape.
@@ -50,6 +59,7 @@ class JiraStoryResponse(BaseModel):
     priority: str | None
     assignee: str | None
     reportee: str | None
+    comment: str | None
     status: str
     story_points: Decimal | None
     percent_complete: Decimal | None
@@ -62,6 +72,10 @@ class JiraStoryResponse(BaseModel):
 class JiraStoryListResponse(BaseModel):
     count: int
     stories: list[JiraStoryResponse]
+
+
+class StoryCommentRequest(BaseModel):
+    comment: str = Field(min_length=1, description="Developer comment for a new story version")
 
 
 class TitleSuggestionsResponse(BaseModel):

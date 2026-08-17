@@ -1,7 +1,7 @@
 from datetime import date
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -11,10 +11,16 @@ from app.schemas.wsr import (
     WsrContentSlide,
     WsrGenerateRequest,
     WsrGenerateResponse,
+    WsrGenerationCheckResponse,
     WsrJobStartResponse,
     WsrMeta,
     WsrPreviewSlide,
     WsrStatusResponse,
+    WsrTemplateInfoResponse,
+    WsrTemplateItemResponse,
+    WsrTemplateListResponse,
+    WsrTemplateStageResponse,
+    WsrTemplateUploadResponse,
     WsrWeekListResponse,
     WsrWeekSummary,
 )
@@ -29,11 +35,25 @@ from app.services.wsr_preview_service import (
     export_wsr_slide_previews,
     resolve_preview_image_path,
 )
+from app.services.onedrive_upload_service import try_upload_wsr_ppt
 from app.services.wsr_service import (
     generate_wsr_deck,
     list_generated_wsr_weeks,
     load_wsr_week,
     resolve_wsr_ppt_path,
+)
+from app.services.wsr_variant_service import check_wsr_generation
+from app.services.wsr_template_upload_service import (
+    cancel_draft_template,
+    export_template_slide_previews,
+    get_draft_template_info,
+    get_uploaded_template_info,
+    list_saved_templates,
+    resolve_template_path,
+    resolve_template_preview_image_path,
+    save_draft_template,
+    save_uploaded_template,
+    stage_template_upload,
 )
 
 router = APIRouter(prefix="/api/wsr", tags=["wsr"])
@@ -56,6 +76,11 @@ def _build_generate_response(result: dict) -> WsrGenerateResponse:
         preview_slides=[
             WsrPreviewSlide(**slide) for slide in result.get("preview_slides", [])
         ],
+        onedrive_web_url=result.get("onedrive_web_url"),
+        variant=int(result.get("variant") or 1),
+        variant_label=str(result.get("variant_label") or "WSR"),
+        template_id=result.get("template_id"),
+        template_name=result.get("template_name"),
     )
 
 
@@ -72,13 +97,41 @@ def list_wsr_weeks() -> WsrWeekListResponse:
 def get_wsr_week(
     start_date: date = Query(..., description="WSR week start (Monday)"),
     end_date: date = Query(..., description="WSR week end (Friday)"),
+    variant: int = Query(1, ge=1, description="WSR deck variant (1=primary, 2=V2, …)"),
 ) -> WsrGenerateResponse:
     """Load an existing generated WSR deck for a week without regenerating."""
     try:
-        result = load_wsr_week(start_date, end_date)
+        result = load_wsr_week(start_date, end_date, variant=variant)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _build_generate_response(result)
+
+
+@router.get("/generate/check", response_model=WsrGenerationCheckResponse)
+def check_wsr_generation_route(
+    start_date: date = Query(..., description="WSR week start (Monday)"),
+    end_date: date = Query(..., description="WSR week end (Friday)"),
+    template_id: str = Query(..., description="Saved WSR template id"),
+) -> WsrGenerationCheckResponse:
+    """Check whether a week can be generated with the selected template."""
+    try:
+        resolve_template_path(template_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"start_date ({start_date}) must be on or before "
+                f"end_date ({end_date})."
+            ),
+        )
+
+    result = check_wsr_generation(start_date, end_date, template_id)
+    return WsrGenerationCheckResponse(**result)
 
 
 @router.post("/generate", response_model=WsrJobStartResponse, status_code=202)
@@ -102,9 +155,28 @@ def generate_wsr(
             ),
         )
 
+    try:
+        resolve_template_path(body.template_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    generation_check = check_wsr_generation(
+        body.start_date,
+        body.end_date,
+        body.template_id,
+    )
+    if not generation_check["can_generate"]:
+        raise HTTPException(
+            status_code=409,
+            detail=generation_check["message"],
+        )
+
     job = start_wsr_job(
         start_date=body.start_date,
         end_date=body.end_date,
+        template_id=body.template_id,
         force=body.force,
     )
     return WsrJobStartResponse(
@@ -138,9 +210,11 @@ def get_wsr_status(
     )
     if job.status == "completed" and job.result is not None:
         if "download_url" not in job.result:
+            variant = int(job.result.get("variant") or 1)
             job.result["download_url"] = (
                 f"/api/wsr/download?start_date={start_date.isoformat()}"
                 f"&end_date={end_date.isoformat()}"
+                f"&variant={variant}"
             )
         response.result = _build_generate_response(job.result)
     return response
@@ -150,12 +224,14 @@ def get_wsr_status(
 def list_wsr_preview_slides(
     start_date: date = Query(..., description="WSR week start (Monday)"),
     end_date: date = Query(..., description="WSR week end (Friday)"),
+    variant: int = Query(1, ge=1, description="WSR deck variant (1=primary, 2=V2, …)"),
 ) -> list[WsrPreviewSlide]:
     """Return rendered slide previews for an existing WSR deck."""
     try:
         slides = export_wsr_slide_previews(
             start_date=start_date,
             end_date=end_date,
+            variant=variant,
             use_cache=True,
         )
     except FileNotFoundError as exc:
@@ -173,6 +249,7 @@ def get_wsr_preview_image(
     start_date: date = Query(..., description="WSR week start (Monday)"),
     end_date: date = Query(..., description="WSR week end (Friday)"),
     slide_index: int = Query(..., ge=1, description="1-based slide index"),
+    variant: int = Query(1, ge=1, description="WSR deck variant (1=primary, 2=V2, …)"),
 ) -> FileResponse:
     """Serve a rendered PNG preview for one slide of the generated WSR deck."""
     try:
@@ -180,6 +257,7 @@ def get_wsr_preview_image(
             start_date=start_date,
             end_date=end_date,
             slide_index=slide_index,
+            variant=variant,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -190,9 +268,10 @@ def get_wsr_preview_image(
 def download_wsr_deck(
     start_date: date = Query(..., description="WSR week start (Monday)"),
     end_date: date = Query(..., description="WSR week end (Friday)"),
+    variant: int = Query(1, ge=1, description="WSR deck variant (1=primary, 2=V2, …)"),
 ) -> FileResponse:
     """Download the generated PowerPoint for a WSR week."""
-    ppt_path = resolve_wsr_ppt_path(start_date, end_date)
+    ppt_path = resolve_wsr_ppt_path(start_date, end_date, variant=variant)
     if not ppt_path.is_file():
         raise HTTPException(
             status_code=404,
@@ -278,12 +357,21 @@ def sync_editor_deck(
             end_date=end_date,
             use_cache=False,
         )
+        onedrive_web_url = try_upload_wsr_ppt(
+            paths.ppt_path,
+            start_date=start_date,
+            end_date=end_date,
+        )
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail=f"Sync to PowerPoint failed: {exc}",
         ) from exc
-    return {"ok": True, "preview_slides": preview_slides}
+    return {
+        "ok": True,
+        "preview_slides": preview_slides,
+        "onedrive_web_url": onedrive_web_url,
+    }
 
 
 @router.post("/editor/export")
@@ -317,3 +405,162 @@ def export_editor_deck(
         ),
         filename=paths.ppt_path.name,
     )
+
+
+@router.get("/templates", response_model=WsrTemplateListResponse)
+def list_wsr_templates() -> WsrTemplateListResponse:
+    """List saved WSR templates (newest first) and any staged draft."""
+    templates = [WsrTemplateItemResponse(**item) for item in list_saved_templates()]
+    draft_info = get_draft_template_info()
+    draft = WsrTemplateItemResponse(**draft_info) if draft_info else None
+    return WsrTemplateListResponse(templates=templates, draft=draft)
+
+
+@router.get("/template", response_model=WsrTemplateInfoResponse | None)
+def get_wsr_uploaded_template() -> WsrTemplateInfoResponse | None:
+    """Return metadata for the newest saved WSR template."""
+    info = get_uploaded_template_info()
+    if info is None:
+        return None
+    return WsrTemplateInfoResponse(**info)
+
+
+@router.post("/template/stage", response_model=WsrTemplateStageResponse)
+async def stage_wsr_template(
+    file: UploadFile = File(..., description="WSR template .pptx file"),
+) -> WsrTemplateStageResponse:
+    """Stage an uploaded template for preview; call /template/save to persist it."""
+    filename = file.filename or "template.pptx"
+    if not filename.lower().endswith(".pptx"):
+        raise HTTPException(status_code=400, detail="Only .pptx files are supported.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    try:
+        result = stage_template_upload(content=content, original_filename=filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Template staging failed: {exc}",
+        ) from exc
+
+    preview_slides = [
+        WsrPreviewSlide(**slide) for slide in result.get("preview_slides", [])
+    ]
+    return WsrTemplateStageResponse(
+        id=result["id"],
+        filename=result["filename"],
+        original_filename=result["original_filename"],
+        updated_at=result["updated_at"],
+        slide_count=result["slide_count"],
+        file_size_bytes=result["file_size_bytes"],
+        is_draft=result.get("is_draft", True),
+        thumbnail_url=result["thumbnail_url"],
+        preview_slides=preview_slides,
+    )
+
+
+@router.post("/template/save", response_model=WsrTemplateItemResponse)
+def save_staged_wsr_template() -> WsrTemplateItemResponse:
+    """Persist a staged draft template into the saved template library."""
+    try:
+        info = save_draft_template()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Template save failed: {exc}",
+        ) from exc
+    return WsrTemplateItemResponse(**info)
+
+
+@router.delete("/template/draft", status_code=204)
+def discard_staged_wsr_template() -> None:
+    """Discard the staged draft template without saving."""
+    cancel_draft_template()
+
+
+@router.post("/template/upload", response_model=WsrTemplateUploadResponse)
+async def upload_wsr_template(
+    file: UploadFile = File(..., description="WSR template .pptx file"),
+) -> WsrTemplateUploadResponse:
+    """Save an uploaded template directly to the template library."""
+    filename = file.filename or "template.pptx"
+    if not filename.lower().endswith(".pptx"):
+        raise HTTPException(status_code=400, detail="Only .pptx files are supported.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    try:
+        result = save_uploaded_template(content=content, original_filename=filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Template upload failed: {exc}",
+        ) from exc
+
+    preview_slides = [
+        WsrPreviewSlide(**slide) for slide in result.get("preview_slides", [])
+    ]
+    return WsrTemplateUploadResponse(
+        filename=result["filename"],
+        original_filename=result["original_filename"],
+        uploaded_at=result["uploaded_at"],
+        slide_count=result["slide_count"],
+        file_size_bytes=result["file_size_bytes"],
+        preview_slides=preview_slides,
+    )
+
+
+@router.get("/template/preview/slides", response_model=list[WsrPreviewSlide])
+def list_wsr_template_preview_slides(
+    template_id: str | None = Query(
+        None,
+        description="Saved template id or __draft__ for staged upload",
+    ),
+) -> list[WsrPreviewSlide]:
+    """Return rendered slide previews for a saved or staged WSR template."""
+    try:
+        slides = export_template_slide_previews(
+            template_id=template_id,
+            use_cache=True,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Template preview export failed: {exc}",
+        ) from exc
+    return [WsrPreviewSlide(**slide) for slide in slides]
+
+
+@router.get("/template/preview/image")
+def get_wsr_template_preview_image(
+    slide_index: int = Query(..., ge=1, description="1-based slide index"),
+    template_id: str | None = Query(
+        None,
+        description="Saved template id or __draft__ for staged upload",
+    ),
+    thumb: int = Query(0, ge=0, le=1, description="Reserved for thumbnail requests"),
+) -> FileResponse:
+    """Serve a rendered PNG preview for one slide of a WSR template."""
+    del thumb
+    try:
+        image_path = resolve_template_preview_image_path(
+            slide_index=slide_index,
+            template_id=template_id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path=image_path, media_type="image/png")
+

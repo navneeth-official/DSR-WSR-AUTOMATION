@@ -3,53 +3,60 @@
 from __future__ import annotations
 
 import json
-import re
-import subprocess
-import sys
 from datetime import date, datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app.paths import (
-    G10X_TEMPLATE,
-    OUTPUT_DIR,
-    PPT_BUILDER,
-    REPO_ROOT,
-    ensure_output_dir,
-    wsr_output_paths,
-    wsr_preview_dir,
-)
+from app.paths import OUTPUT_DIR, ensure_output_dir, wsr_preview_dir
 from app.services.ppt_content_builder import build_ppt_content
 from app.services.ppt_content_preview import format_content_preview
 from app.services.wsr_preview_service import export_wsr_slide_previews
+from app.services.onedrive_upload_service import (
+    load_onedrive_web_url,
+    try_upload_wsr_ppt,
+)
+from app.services.wsr_template_upload_service import resolve_template_path
+from app.services.wsr_variant_service import (
+    WSR_PPTX_RE,
+    check_wsr_generation,
+    list_week_variants,
+    register_generated_variant,
+    resolve_variant_paths,
+    sync_manifest_from_disk,
+    variant_label,
+)
 
-_WSR_PPTX_RE = re.compile(r"^WSR_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.pptx$")
+_WSR_DUPLICATE_TEMPLATE = "WSR_ALREADY_GENERATED"
+
+
+class WsrAlreadyGeneratedError(ValueError):
+    """Raised when the same week was already generated with the same template."""
+
+    def __init__(self, message: str, *, check: dict) -> None:
+        super().__init__(message)
+        self.check = check
 
 
 def build_ppt_deck(
     content_json: Path,
     ppt_output: Path,
-    layout_hints: Path | None = None,
+    *,
+    template_path: Path,
 ) -> None:
-    """Run update_delivery_status.py with G10X layout rules."""
-    if not PPT_BUILDER.is_file():
-        raise FileNotFoundError(f"PPT builder not found: {PPT_BUILDER}")
-    if not G10X_TEMPLATE.is_file():
-        raise FileNotFoundError(f"G10X template not found: {G10X_TEMPLATE}")
+    """Build a WSR deck with the template-agnostic engine (v2)."""
+    from app.wsr_engine.main import WsrEngine
 
-    cmd = [
-        sys.executable,
-        str(PPT_BUILDER),
-        "--content",
-        str(content_json.resolve()),
-        "--output",
-        str(ppt_output.resolve()),
-    ]
-    if layout_hints and layout_hints.is_file():
-        cmd.extend(["--layout-hints", str(layout_hints.resolve())])
     ensure_output_dir()
-    subprocess.run(cmd, cwd=str(REPO_ROOT), check=True)
+    report = WsrEngine().run(
+        template_path=template_path,
+        content_path=content_json,
+        output_path=ppt_output,
+    )
+    for line in report.summary_lines():
+        print(f"   {line}")
+    if report.errors:
+        raise RuntimeError(f"WSR engine errors: {report.errors}")
 
 
 def generate_wsr_deck(
@@ -57,6 +64,8 @@ def generate_wsr_deck(
     *,
     start_date: date,
     end_date: date,
+    template_id: str,
+    variant: int | None = None,
 ) -> dict:
     """
     Build ppt_content.json and the PowerPoint deck for a WSR week.
@@ -67,7 +76,16 @@ def generate_wsr_deck(
             f"start_date ({start_date}) must be on or before end_date ({end_date})."
         )
 
-    paths = wsr_output_paths(start_date, end_date)
+    generation_check = check_wsr_generation(start_date, end_date, template_id)
+    if not generation_check["can_generate"]:
+        raise WsrAlreadyGeneratedError(
+            str(generation_check["message"]),
+            check=generation_check,
+        )
+
+    resolved_variant = variant or int(generation_check["variant"])
+    paths = resolve_variant_paths(start_date, end_date, resolved_variant)
+    template_path = resolve_template_path(template_id)
     content = build_ppt_content(
         db,
         start_date=start_date,
@@ -81,20 +99,36 @@ def generate_wsr_deck(
     preview_text = format_content_preview(content)
     paths.preview_path.write_text(preview_text, encoding="utf-8")
 
-    build_ppt_deck(paths.json_path, paths.ppt_path)
+    build_ppt_deck(paths.json_path, paths.ppt_path, template_path=template_path)
+
+    variant_record = register_generated_variant(
+        start_date,
+        end_date,
+        variant=resolved_variant,
+        template_id=template_id,
+        ppt_path=paths.ppt_path,
+    )
+
+    onedrive_web_url = try_upload_wsr_ppt(
+        paths.ppt_path,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     preview_slides: list[dict] = []
     try:
         preview_slides = export_wsr_slide_previews(
             start_date=start_date,
             end_date=end_date,
+            variant=resolved_variant,
+            use_cache=False,
         )
     except Exception as exc:
         print(f"Warning: WSR slide preview export failed: {exc}")
 
     download_url = (
         f"/api/wsr/download?start_date={start_date.isoformat()}"
-        f"&end_date={end_date.isoformat()}"
+        f"&end_date={end_date.isoformat()}&variant={resolved_variant}"
     )
     return {
         "report_start_date": content["report_start_date"],
@@ -107,77 +141,128 @@ def generate_wsr_deck(
         "json_filename": paths.json_path.name,
         "ppt_path": str(paths.ppt_path),
         "download_url": download_url,
+        "onedrive_web_url": onedrive_web_url,
+        "variant": resolved_variant,
+        "variant_label": variant_label(resolved_variant),
+        "template_id": template_id,
+        "template_name": variant_record.get("template_name"),
     }
 
 
-def resolve_wsr_ppt_path(start_date: date, end_date: date) -> Path:
-    """Return the expected PPT path for a WSR week (may not exist yet)."""
-    return wsr_output_paths(start_date, end_date).ppt_path
+def resolve_wsr_ppt_path(
+    start_date: date,
+    end_date: date,
+    *,
+    variant: int = 1,
+) -> Path:
+    """Return the expected PPT path for a WSR week variant (may not exist yet)."""
+    return resolve_variant_paths(start_date, end_date, variant).ppt_path
+
+
+def _deck_slide_count(ppt_path: Path, preview_dir: Path) -> int:
+    """Total slides in the generated WSR deck (not track count from content JSON)."""
+    if ppt_path.is_file():
+        try:
+            from pptx import Presentation
+
+            return len(Presentation(str(ppt_path)).slides)
+        except Exception:
+            pass
+    if preview_dir.is_dir():
+        preview_files = sorted(preview_dir.glob("slide_*.png"))
+        if preview_files:
+            return len(preview_files)
+    return 0
 
 
 def list_generated_wsr_weeks() -> list[dict]:
-    """Scan output/ for generated WSR .pptx files, newest week first."""
+    """Scan output/ for generated WSR .pptx files, newest first."""
     if not OUTPUT_DIR.is_dir():
         return []
 
-    weeks: list[dict] = []
+    seen_weeks: set[tuple[str, str]] = set()
     for ppt_path in OUTPUT_DIR.glob("WSR_*.pptx"):
-        match = _WSR_PPTX_RE.match(ppt_path.name)
+        match = WSR_PPTX_RE.match(ppt_path.name)
         if not match:
             continue
-
         start_s, end_s = match.group(1), match.group(2)
+        seen_weeks.add((start_s, end_s))
+
+    weeks: list[dict] = []
+    for start_s, end_s in seen_weeks:
         start_date = date.fromisoformat(start_s)
         end_date = date.fromisoformat(end_s)
+        sync_manifest_from_disk(start_date, end_date)
+        for variant_info in list_week_variants(start_date, end_date):
+            variant = int(variant_info.get("variant") or 1)
+            paths = resolve_variant_paths(start_date, end_date, variant)
+            if not paths.ppt_path.is_file():
+                continue
 
-        story_count = 0
-        slide_count = 0
-        json_path = OUTPUT_DIR / f"WSR_{start_s}_{end_s}.json"
-        if json_path.is_file():
-            try:
-                payload = json.loads(json_path.read_text(encoding="utf-8"))
-                meta = payload.get("meta") or {}
-                story_count = int(meta.get("story_count") or 0)
-                slide_count = int(meta.get("slide_count") or 0)
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
+            preview_dir = wsr_preview_dir(start_date, end_date, variant=variant)
+            slide_count = _deck_slide_count(paths.ppt_path, preview_dir)
 
-        thumbnail_url: str | None = None
-        preview_dir = wsr_preview_dir(start_date, end_date)
-        if preview_dir.is_dir() and any(preview_dir.glob("slide_*.png")):
-            thumbnail_url = (
-                f"/api/wsr/preview/image?start_date={start_s}"
-                f"&end_date={end_s}&slide_index=1"
+            thumbnail_url: str | None = None
+            if preview_dir.is_dir() and any(preview_dir.glob("slide_*.png")):
+                thumbnail_url = (
+                    f"/api/wsr/preview/image?start_date={start_s}"
+                    f"&end_date={end_s}&slide_index=1&variant={variant}"
+                )
+
+            generated_at = variant_info.get("generated_at")
+            if not generated_at:
+                generated_at = datetime.fromtimestamp(
+                    paths.ppt_path.stat().st_mtime
+                ).isoformat()
+
+            weeks.append(
+                {
+                    "report_start_date": start_s,
+                    "report_end_date": end_s,
+                    "variant": variant,
+                    "variant_label": variant_label(variant),
+                    "template_id": variant_info.get("template_id"),
+                    "template_name": variant_info.get("template_name"),
+                    "filename": paths.ppt_path.name,
+                    "generated_at": generated_at,
+                    "slide_count": slide_count,
+                    "thumbnail_url": thumbnail_url,
+                    "download_url": (
+                        f"/api/wsr/download?start_date={start_s}&end_date={end_s}"
+                        f"&variant={variant}"
+                    ),
+                }
             )
 
-        modified = datetime.fromtimestamp(ppt_path.stat().st_mtime)
-        weeks.append(
-            {
-                "report_start_date": start_s,
-                "report_end_date": end_s,
-                "filename": ppt_path.name,
-                "generated_at": modified.isoformat(),
-                "story_count": story_count,
-                "slide_count": slide_count,
-                "thumbnail_url": thumbnail_url,
-                "download_url": (
-                    f"/api/wsr/download?start_date={start_s}&end_date={end_s}"
-                ),
-            }
-        )
-
-    weeks.sort(key=lambda item: item["report_start_date"], reverse=True)
+    weeks.sort(
+        key=lambda item: (item["report_start_date"], -int(item["variant"])),
+        reverse=True,
+    )
     return weeks
 
 
-def load_wsr_week(start_date: date, end_date: date) -> dict:
+def load_wsr_week(
+    start_date: date,
+    end_date: date,
+    *,
+    variant: int = 1,
+) -> dict:
     """Load an already-generated WSR week from disk (no regeneration)."""
-    paths = wsr_output_paths(start_date, end_date)
+    paths = resolve_variant_paths(start_date, end_date, variant)
     if not paths.ppt_path.is_file():
         raise FileNotFoundError(
-            f"No WSR deck found for {start_date} to {end_date}. "
-            "Call POST /api/wsr/generate first."
+            f"No WSR deck found for {start_date} to {end_date} "
+            f"({variant_label(variant)}). Call POST /api/wsr/generate first."
         )
+
+    variant_info = next(
+        (
+            item
+            for item in list_week_variants(start_date, end_date)
+            if int(item.get("variant") or 1) == variant
+        ),
+        None,
+    )
 
     content: dict = {
         "report_start_date": start_date.isoformat(),
@@ -205,6 +290,7 @@ def load_wsr_week(start_date: date, end_date: date) -> dict:
         preview_slides = export_wsr_slide_previews(
             start_date=start_date,
             end_date=end_date,
+            variant=variant,
             use_cache=True,
         )
     except Exception as exc:
@@ -212,8 +298,9 @@ def load_wsr_week(start_date: date, end_date: date) -> dict:
 
     download_url = (
         f"/api/wsr/download?start_date={start_date.isoformat()}"
-        f"&end_date={end_date.isoformat()}"
+        f"&end_date={end_date.isoformat()}&variant={variant}"
     )
+    onedrive_web_url = load_onedrive_web_url(start_date, end_date)
     return {
         "report_start_date": content["report_start_date"],
         "report_end_date": content["report_end_date"],
@@ -223,4 +310,9 @@ def load_wsr_week(start_date: date, end_date: date) -> dict:
         "preview": preview_text,
         "filename": paths.ppt_path.name,
         "download_url": download_url,
+        "onedrive_web_url": onedrive_web_url,
+        "variant": variant,
+        "variant_label": variant_label(variant),
+        "template_id": variant_info.get("template_id") if variant_info else None,
+        "template_name": variant_info.get("template_name") if variant_info else None,
     }

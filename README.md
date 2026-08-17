@@ -2,6 +2,8 @@
 
 Python tooling that stores Jira story data in PostgreSQL and builds **H-E-B Weekly Status Report (WSR)** PowerPoint decks from the G10X template.
 
+> **Full project guide** (frontend + API + deployment + PowerPoint COM): see the repository root [README.md](../../README.md).
+
 ## How it works
 
 ```

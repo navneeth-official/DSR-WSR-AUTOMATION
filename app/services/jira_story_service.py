@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -121,6 +121,29 @@ class JiraStoryService:
             )
         return self.update_story_from_body(body)
 
+    def add_story_comment(self, jira_key: str, comment: str) -> JiraStoryResponse:
+        """Append a developer comment as a new snapshot version (never overwrites prior rows)."""
+        text = comment.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Comment cannot be empty")
+
+        latest = self._stories.get_latest_by_key(jira_key)
+        if latest is None:
+            raise HTTPException(status_code=404, detail=f"Story '{jira_key}' not found")
+
+        snapshot_date = self._next_snapshot_date(jira_key)
+        body = _story_to_save_request(latest)
+        body = body.model_copy(
+            update={
+                "comment": text,
+                "snapshot_date": snapshot_date,
+                "updated_date": date.today(),
+            }
+        )
+        story = self._save_story(body, snapshot_date=snapshot_date)
+        reloaded = self._stories.get_by_key_and_date(story.jira_key, story.snapshot_date)
+        return _to_response(reloaded or story)
+
     def suggest_story_titles(
         self,
         jira_key: str,
@@ -161,29 +184,69 @@ class JiraStoryService:
 
         updated_date = body.updated_date or today
 
-        story = self._stories.upsert(
-            jira_key=body.jira_key,
-            snapshot_date=snapshot_date,
-            project_key=project_key,
-            project_name=project_name,
-            sprint_name=body.sprint,
-            sprint_start_date=body.sprint_start_date,
-            sprint_end_date=body.sprint_end_date,
-            title=body.title,
-            summary=body.summary,
-            description=body.description,
-            issue_type=body.issue_type,
-            priority=body.priority,
-            assignee=body.assignee,
-            reporter=body.reportee,
-            status=body.status,
-            story_points=body.story_points,
-            created_date=created_date,
-            updated_date=updated_date,
-            resolved_date=body.resolved_date,
-            completion=completion,
-        )
+        upsert_kwargs: dict = {
+            "jira_key": body.jira_key,
+            "snapshot_date": snapshot_date,
+            "project_key": project_key,
+            "project_name": project_name,
+            "sprint_name": body.sprint,
+            "sprint_start_date": body.sprint_start_date,
+            "sprint_end_date": body.sprint_end_date,
+            "title": body.title,
+            "summary": body.summary,
+            "description": body.description,
+            "issue_type": body.issue_type,
+            "priority": body.priority,
+            "assignee": body.assignee,
+            "reporter": body.reportee,
+            "status": body.status,
+            "story_points": body.story_points,
+            "created_date": created_date,
+            "updated_date": updated_date,
+            "resolved_date": body.resolved_date,
+            "completion": completion,
+        }
+        if "comment" in body.model_fields_set:
+            upsert_kwargs["comment"] = body.comment
+
+        story = self._stories.upsert(**upsert_kwargs)
         return self._stories.persist_generated_title(story)
+
+    def _next_snapshot_date(self, jira_key: str) -> date:
+        """Pick the next unused snapshot date for a new version row."""
+        today = date.today()
+        latest = self._stories.get_latest_by_key(jira_key)
+        candidate = today
+        if latest is not None:
+            candidate = max(today, latest.snapshot_date)
+        while self._stories.get_by_key_and_date(jira_key, candidate) is not None:
+            candidate += timedelta(days=1)
+        return candidate
+
+
+def _story_to_save_request(story: JiraStory) -> JiraStorySaveRequest:
+    sprint = story.sprint
+    return JiraStorySaveRequest(
+        jira_key=story.jira_key,
+        summary=story.summary,
+        track=story.project.project_key,
+        sprint=sprint.sprint_name if sprint else None,
+        sprint_start_date=sprint.sprint_start_date if sprint else None,
+        sprint_end_date=sprint.sprint_end_date if sprint else None,
+        date_assigned=story.created_date,
+        status=story.status,
+        story_points=story.story_points,
+        percent_complete=story.completion,
+        assignee=story.assignee,
+        reportee=story.reporter,
+        title=story.title,
+        description=story.description,
+        issue_type=story.issue_type,
+        priority=story.priority,
+        updated_date=story.updated_date,
+        resolved_date=story.resolved_date,
+        snapshot_date=story.snapshot_date,
+    )
 
 
 def _resolve_track(track: str) -> tuple[str, str]:
@@ -224,6 +287,7 @@ def _to_response(story: JiraStory) -> JiraStoryResponse:
         priority=story.priority,
         assignee=story.assignee,
         reportee=story.reporter,
+        comment=story.comment,
         status=story.status,
         story_points=story.story_points,
         percent_complete=story.completion,

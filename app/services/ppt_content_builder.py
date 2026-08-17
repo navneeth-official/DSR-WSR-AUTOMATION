@@ -53,6 +53,20 @@ def _bucket_story(status: str) -> str:
     return STATUS_TO_BUCKET.get(status.strip().lower(), "completed")
 
 
+def key_activities_from_inprogress(sections: list[dict[str, Any]]) -> list[str]:
+    """Mirror HL 'Stories in-progress this week' bullets in the KA tab."""
+    items: list[str] = []
+    seen: set[str] = set()
+    for section in sections:
+        for story in section.get("inprogress") or []:
+            text = str(story).strip()
+            key = text.lower()
+            if text and key not in seen:
+                seen.add(key)
+                items.append(text)
+    return items
+
+
 def _slide_order_key(project_key: str) -> tuple[int, str]:
     try:
         return (PPT_SLIDE_ORDER.index(project_key), project_key)
@@ -101,20 +115,23 @@ def build_slide_chunks(
         sprint_dates = format_sprint_dates_for_display(sprint_start, sprint_end)
         status_word = _sprint_status_label(sprint.sprint_status if sprint else None)
 
+        section_payload = {
+            "sprint_name": sprint_name,
+            "sprint_start_date": sprint_start.isoformat() if sprint_start else None,
+            "sprint_end_date": sprint_end.isoformat() if sprint_end else None,
+            "sprint_dates": sprint_dates,
+            "sprint_status": status_word,
+            "released": released,
+            "inprogress": inprogress,
+            "completed": completed,
+        }
         chunks.append(
             {
                 "project_key": project_key,
                 "project_name": project_name,
                 "title": ppt_slide_title(project_key, project_name),
-                "sprint_name": sprint_name,
-                "sprint_start_date": sprint_start.isoformat() if sprint_start else None,
-                "sprint_end_date": sprint_end.isoformat() if sprint_end else None,
-                "sprint_dates": sprint_dates,
-                "sprint_status": status_word,
-                "released": released,
-                "inprogress": inprogress,
-                "completed": completed,
-                "key_activities": [],
+                "key_activities": key_activities_from_inprogress([section_payload]),
+                **section_payload,
             }
         )
 
@@ -153,10 +170,15 @@ def group_chunks_by_slide_title(chunks: list[dict[str, Any]]) -> list[dict[str, 
                 "project_name": chunk["project_name"],
                 "title": title,
                 "sections": [],
-                "key_activities": chunk.get("key_activities", []),
+                "key_activities": [],
             }
             order.append(title)
         by_title[title]["sections"].append(section)
+
+    for title in order:
+        by_title[title]["key_activities"] = key_activities_from_inprogress(
+            by_title[title]["sections"]
+        )
 
     return [by_title[t] for t in order]
 
@@ -171,13 +193,16 @@ def build_ppt_content(
     start_date: date,
     end_date: date,
     merge_titles: bool = True,
+    save_titles: bool = False,
+    regenerate_titles: bool = False,
 ) -> dict[str, Any]:
     """
     Full pipeline: fetch stories for WSR date range and return JSON for PPT build.
 
-    Story bullet text uses ``jira_stories.title`` from the database. Titles are
-    expected to be created during intake; missing titles fall back to summary on
-    the slide only (no LLM calls during WSR generation).
+    Story bullet text uses ``jira_stories.title`` from the database. By default,
+    titles are expected to be created during intake; missing titles fall back to
+    summary on the slide only (no LLM calls). Use ``save_titles`` or
+    ``regenerate_titles`` to invoke title generation via ``ensure_story_titles``.
 
     Sprint selection uses overlap against ``start_date``/``end_date`` (unchanged).
     One snapshot per ``jira_key`` is chosen (latest in-range, else latest overall).
@@ -196,7 +221,24 @@ def build_ppt_content(
             f"No stories found for report period {start_date} to {end_date}."
         )
 
+    titles_generated = 0
+    titles_reused = 0
+    if save_titles or regenerate_titles:
+        from app.services.title_generator import ensure_story_titles
+
+        titles_generated, titles_reused = ensure_story_titles(
+            stories,
+            save=save_titles,
+            db=db if save_titles else None,
+            regenerate=regenerate_titles,
+        )
+        if save_titles:
+            db.commit()
+
     titles_from_db, titles_fallback_summary = _title_usage_stats(stories)
+    if not save_titles and not regenerate_titles:
+        titles_generated = 0
+        titles_reused = titles_from_db
 
     chunks = build_slide_chunks(stories)
     if merge_titles:
@@ -213,8 +255,7 @@ def build_ppt_content(
             "slide_count": len(slides),
             "titles_from_db": titles_from_db,
             "titles_fallback_summary": titles_fallback_summary,
-            # Backward-compatible aliases (no LLM title generation in WSR path).
-            "titles_generated": 0,
-            "titles_reused": titles_from_db,
+            "titles_generated": titles_generated,
+            "titles_reused": titles_reused,
         },
     }

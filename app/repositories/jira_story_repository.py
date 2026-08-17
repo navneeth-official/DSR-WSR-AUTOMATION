@@ -12,6 +12,9 @@ from app.repositories.sprint_repository import SprintRepository
 from app.services.title_generator import assign_title_if_missing, force_regenerate_title
 
 
+_UNSET = object()
+
+
 class JiraStoryRepository:
     """Data access layer for jira_stories table (composite key: jira_key + snapshot_date)."""
 
@@ -244,6 +247,7 @@ class JiraStoryRepository:
         resolved_date: date | None = None,
         title: str | None = None,
         completion: Decimal | float | int | None = None,
+        comment: str | None | object = _UNSET,
     ) -> JiraStory:
         """Insert or update a story snapshot for (jira_key, snapshot_date)."""
         project = self._projects.get_or_create(
@@ -290,6 +294,7 @@ class JiraStoryRepository:
                 resolved_date=resolved_date,
                 title=resolved_title,
                 completion=_to_decimal(completion),
+                comment=None if comment is _UNSET else comment,
             )
             self.db.add(story)
         else:
@@ -313,6 +318,8 @@ class JiraStoryRepository:
             elif title is not None:
                 story.title = title
             story.completion = _to_decimal(completion)
+            if comment is not _UNSET:
+                story.comment = comment
 
         self.db.commit()
         self.db.refresh(story)

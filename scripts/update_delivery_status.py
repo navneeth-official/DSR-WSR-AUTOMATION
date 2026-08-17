@@ -30,6 +30,8 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from app.services.sprint_display import sprint_dates_from_section
 from app.services.ppt_layout_metrics import hl_ka_tab_gap_emu, rendered_text_bottom_emu
+from app.services.ppt_hl_bullets import set_story_line_text
+from app.services.ppt_logo_sync import sync_heb_logo_from_main
 
 G10X = str(_REPO_ROOT / "templates" / "G10X H-E-B WSR Sustainment 05 June 2026 .pptx")
 OUTPUT = str(_REPO_ROOT / "output" / "HEB_Delivery_Status.pptx")
@@ -479,6 +481,11 @@ def parse_args():
         help="Path to layout hints JSON (pack_all_sections_on_main per service)",
     )
     parser.add_argument(
+        "--template",
+        default=G10X,
+        help="Path to the WSR .pptx template used to build the deck",
+    )
+    parser.add_argument(
         "--wsr-start-date",
         default="",
         help="WSR start date for cover slide (YYYY-MM-DD). Default: report_start_date from --content JSON",
@@ -596,7 +603,7 @@ def replace_bullet_block(txBody, first_index, last_index, items):
     new_paragraphs = []
     for text in items:
         new_p = copy.deepcopy(template_p)
-        set_single_run_text(new_p, text)
+        set_story_line_text(new_p, text)
         _apply_g10x_paragraph_spacing(new_p, is_story=True)
         new_paragraphs.append(new_p)
 
@@ -610,8 +617,16 @@ def replace_bullet_block(txBody, first_index, last_index, items):
 
 
 def normalize_title_text(text):
-    """Strip zero-width spaces and non-breaking spaces for reliable title matching."""
-    return (text or "").replace("\u200b", "").replace("\xa0", " ").strip()
+    """Strip zero-width spaces and normalize Delivery status dash for matching."""
+    cleaned = (text or "").replace("\u200b", "").replace("\xa0", " ").strip()
+    en_dash = "\u2013"
+    return re.sub(
+        r"(Delivery status)\s+-\s+",
+        rf"\1 {en_dash} ",
+        cleaned,
+        count=1,
+        flags=re.I,
+    )
 
 
 def set_title_suffix(slide, suffix, ref_title_shape):
@@ -661,11 +676,14 @@ G10X_LAYOUT_BY_TITLE = {
     "Supplier Core Services": 3,
     "Supplier Core Service": 3,  # alias — matches ppt_mapping.PPT_SLIDE_TITLES
     "Pricing Core Service": 6,
+    "Pricing Core": 6,
     "Wentworth": 7,
     "Location Core Service": 8,
     "Pharmacy and Wellness": 9,
     "Global Sourcing Solution": 11,
     "LoCo": 12,
+    "Patronage Travel": 2,
+    "PATRV": 2,
 }
 
 # Approximate chars per visual line at G10X Highlights content width (12pt Manrope)
@@ -2143,7 +2161,6 @@ def _fill_story_buckets(hl_txBody, offset, section, omit=(), display=False):
                     hdr_p,
                     f"Stories in-progress this week \u2013 {count} stories",
                 )
-            _ensure_category_header_bullet(hdr_p)
         offset = _advance_offset_after_bullets(
             hl_txBody, offset, items, has_category_header=has_header
         )
@@ -2319,10 +2336,7 @@ def discover_section_templates(canonical_cell, global_completed=None):
                 required[key] = story_bullet
     if any(v is None for v in required.values()):
         raise RuntimeError("Could not resolve highlights section templates from G10X")
-    for key, val in required.items():
-        if key.endswith("_hdr"):
-            _ensure_category_header_bullet(val)
-    return required
+    return {key: copy.deepcopy(val) for key, val in required.items()}
 
 
 def populate_highlights_cell(hl_cell, section_tmpl, content):
@@ -2644,19 +2658,85 @@ def delete_shape(shape):
 TITLE_SEARCH = {
     "Supplier Core Service": "Supplier Core",
     "LoCo": "LoCo",
+    "Pricing Core": "Pricing Core",
+    "Patronage Travel": "Patronage Travel",
+    "PATRV": "Patronage Travel",
 }
+
+CANONICAL_DELIVERY_CLONE_TITLE = "Cost Core Service"
+
+
+def _last_main_delivery_slide_index(prs) -> int | None:
+    last: int | None = None
+    for i, slide in enumerate(prs.slides):
+        title = _delivery_slide_title_text(slide)
+        if _is_delivery_status_slide_title(title) and "(contd" not in title.lower():
+            last = i
+    return last
+
+
+def ensure_delivery_slide(
+    prs,
+    service_title: str,
+    ref_title_shape,
+) -> int:
+    """
+    Return the 0-based index of the delivery slide for ``service_title``.
+
+    Clones the Cost Core delivery slide when the G10X deck has no matching slide
+  (new team tracks introduced after template publish).
+    """
+    slide_idx = find_slide_by_title(prs, service_title)
+    if slide_idx is not None:
+        return slide_idx
+
+    src_idx = find_slide_by_title(prs, CANONICAL_DELIVERY_CLONE_TITLE)
+    if src_idx is None:
+        raise RuntimeError(
+            f"Cannot create slide for {service_title!r}: "
+            f"{CANONICAL_DELIVERY_CLONE_TITLE} template slide missing"
+        )
+
+    src_slide = prs.slides[src_idx]
+    insert_after = _last_main_delivery_slide_index(prs)
+    if insert_after is None:
+        insert_after = src_idx
+
+    prs.slides.add_slide(src_slide.slide_layout)
+    new_idx = len(prs.slides) - 1
+    new_slide = prs.slides[new_idx]
+    clear_slide_shapes(new_slide)
+    copy_shapes_to_slide(src_slide, new_slide)
+    move_slide_after(prs, new_idx, insert_after)
+    new_idx = insert_after + 1
+
+    set_title_suffix(new_slide, service_title, ref_title_shape)
+    print(f"Created delivery slide for new track: {service_title}")
+    return new_idx
+
+
+def ensure_delivery_slides_for_titles(
+    prs,
+    service_titles: set[str],
+    ref_title_shape,
+) -> None:
+    for title in sorted(service_titles):
+        ensure_delivery_slide(prs, title, ref_title_shape)
 
 
 def find_slide_by_title(prs, title_fragment, exclude_contd=True):
-    search = TITLE_SEARCH.get(title_fragment, title_fragment)
-    for i, slide in enumerate(prs.slides):
-        title = normalize_title_text(
-            next((s.text_frame.text for s in slide.shapes if s.shape_id == 2), "")
-        )
-        if exclude_contd and "(Contd" in title:
-            continue
-        if search in title and "Delivery status" in title:
-            return i
+    search_terms = [TITLE_SEARCH.get(title_fragment, title_fragment)]
+    if title_fragment not in search_terms:
+        search_terms.append(title_fragment)
+    for search in search_terms:
+        for i, slide in enumerate(prs.slides):
+            title = normalize_title_text(
+                next((s.text_frame.text for s in slide.shapes if s.shape_id == 2), "")
+            )
+            if exclude_contd and "(Contd" in title:
+                continue
+            if search in title and "Delivery status" in title:
+                return i
     return None
 
 
@@ -2677,42 +2757,28 @@ def _find_contd_slide_with_ka(prs, title_fragment):
     return indices[-1] if indices else None
 
 
+def _title_search_terms(title_fragment: str) -> list[str]:
+    primary = TITLE_SEARCH.get(title_fragment, title_fragment)
+    terms = [primary]
+    if title_fragment not in terms:
+        terms.append(title_fragment)
+    return terms
+
+
 def find_contd_slides_for_service(prs, title_fragment):
     """All (Contd…) slides for a service in deck order."""
-    search = TITLE_SEARCH.get(title_fragment, title_fragment).lower()
     out: list[int] = []
-    for i, slide in enumerate(prs.slides):
-        title = normalize_title_text(
-            next((s.text_frame.text for s in slide.shapes if s.shape_id == 2), "")
-        ).lower()
-        if search in title and "(contd" in title:
-            out.append(i)
+    for search in _title_search_terms(title_fragment):
+        needle = search.lower()
+        for i, slide in enumerate(prs.slides):
+            if i in out:
+                continue
+            title = normalize_title_text(
+                next((s.text_frame.text for s in slide.shapes if s.shape_id == 2), "")
+            ).lower()
+            if needle in title and "(contd" in title:
+                out.append(i)
     return out
-
-
-def sync_heb_logo_from_main(main_slide, contd_slide) -> bool:
-    """
-    Copy the H-E-B header logo onto a (Contd…) slide.
-
-    Deep-copying shape XML breaks embedded image relationships; re-insert from bytes.
-    """
-    src = next(
-        (s for s in main_slide.shapes if getattr(s, "shape_id", None) == 3),
-        None,
-    )
-    if src is None:
-        return False
-    try:
-        blob = src.image.blob
-    except (AttributeError, ValueError):
-        return False
-    for sh in list(contd_slide.shapes):
-        if getattr(sh, "shape_id", None) == 3:
-            delete_shape(sh)
-    contd_slide.shapes.add_picture(
-        io.BytesIO(blob), src.left, src.top, width=src.width, height=src.height
-    )
-    return True
 
 
 def _create_contd_slide_after(prs, g10x_prs, after_idx, template_index):
@@ -2876,9 +2942,10 @@ def ensure_contd_slide_chain(
     return after_idx
 
 
-def prepare_deck_from_g10x():
-    """Copy G10X template and remove obsolete continuation slides."""
-    shutil.copy2(G10X, OUTPUT)
+def prepare_deck_from_g10x(template_path: str | None = None):
+    """Copy the WSR template and remove obsolete continuation slides."""
+    source = template_path or G10X
+    shutil.copy2(source, OUTPUT)
     prs = Presentation(OUTPUT)
     remove_obsolete_contd_slides(prs)
     remove_pharmacy_contd_if_present(prs)
@@ -2920,11 +2987,13 @@ def move_slide_after(prs, slide_index, after_index):
 
 
 def set_ka_items(ka_shape, items):
+    from app.services.ppt_ka_bullets import replace_ka_bullet_block
+
     txBody = ka_shape.table.cell(1, 0).text_frame._txBody
     all_p = txBody.findall(qn("a:p"))
     if all_p and items:
         last = min(2, len(all_p) - 1)
-        replace_bullet_block(txBody, 0, last, items)
+        replace_ka_bullet_block(txBody, 0, last, items)
 
 
 def ka_would_overflow(slide):
@@ -3081,8 +3150,11 @@ def _is_delivery_status_slide_title(title: str) -> bool:
 
 
 def _service_title_in_slide(title: str, service_title: str) -> bool:
-    search = TITLE_SEARCH.get(service_title, service_title).lower()
-    return search in title.lower()
+    lower = title.lower()
+    for search in _title_search_terms(service_title):
+        if search.lower() in lower:
+            return True
+    return False
 
 
 def remove_unpopulated_delivery_slides(prs, populated_titles: set[str]) -> int:
@@ -3111,9 +3183,9 @@ def remove_unpopulated_delivery_slides(prs, populated_titles: set[str]) -> int:
     return removed
 
 
-def finalize_slide_order(prs):
+def finalize_slide_order(prs, service_titles: list[str] | None = None):
     """Place each service's (Contd…) slide(s) immediately after its main delivery slide."""
-    titles = [raw["title"] for raw in SLIDES.values()]
+    titles = service_titles or [raw["title"] for raw in SLIDES.values()]
     for title in reversed(titles):
         main_idx = find_slide_by_title(prs, title)
         if main_idx is None:
@@ -3148,7 +3220,7 @@ INDEX_ENTRY_RULES: tuple[tuple[tuple[str, ...], str, bool], ...] = (
     (("global sourcing",), "Global Sourcing Solution", True),
     (("loco",), "LoCo", True),
     (("bsa",), "LoCo", True),
-    (("matters of attention",), "Matters of Attention", False),
+    (("matters", "attention"), "Matters Of Attention", False),
     (("team allocation",), "Team Allocation", False),
 )
 
@@ -3290,6 +3362,161 @@ def _clone_cell_text_body(dst_cell, src_tx_body) -> None:
     dst_tc.insert(0, copy.deepcopy(src_tx_body))
 
 
+def _default_index_tx_body(table) -> object | None:
+    for cell in _index_table_cells_row_major(table):
+        if "cost core" in _cell_full_text(cell):
+            return copy.deepcopy(cell.text_frame._txBody)
+    for cell in _index_table_cells_row_major(table):
+        if _cell_has_index_content(cell):
+            return copy.deepcopy(cell.text_frame._txBody)
+    return None
+
+
+def _set_index_label_text(tx_body, label: str) -> None:
+    clean = normalize_title_text(label)
+    for p_elem in tx_body.findall(qn("a:p")):
+        texts = [t.text or "" for t in p_elem.iter(qn("a:t"))]
+        joined = normalize_title_text("".join(texts))
+        if joined and not _INDEX_NUMBER_RE.match(joined):
+            set_single_run_text(p_elem, clean)
+            return
+
+
+def _find_index_cell_tx_body(table, needles: tuple[str, ...]) -> object | None:
+    """Original index cell body for a label fragment (e.g. matters of attention)."""
+    for cell in _index_table_cells_row_major(table):
+        if not _cell_has_index_content(cell):
+            continue
+        cell_text = _cell_full_text(cell)
+        if all(n in cell_text for n in needles):
+            return copy.deepcopy(cell.text_frame._txBody)
+    return None
+
+
+def _non_delivery_slots_from_template(table) -> dict[tuple[str, ...], int]:
+    """Map non-delivery INDEX_ENTRY_RULES needles to their G10X template cell index."""
+    slots: dict[tuple[str, ...], int] = {}
+    for slot_idx, cell in enumerate(_index_table_cells_row_major(table)):
+        cell_text = _cell_full_text(cell)
+        for needles, _search_title, delivery_only in INDEX_ENTRY_RULES:
+            if delivery_only:
+                continue
+            if all(n in cell_text for n in needles):
+                slots[tuple(needles)] = slot_idx
+    return slots
+
+
+def _find_non_delivery_slide_index(
+    prs,
+    needles: tuple[str, ...],
+    search_title: str,
+) -> int | None:
+    target_idx = _find_slide_by_plain_title(prs, search_title)
+    if target_idx is not None:
+        return target_idx
+    for fragment in needles:
+        target_idx = _find_slide_by_plain_title(prs, fragment)
+        if target_idx is not None:
+            return target_idx
+    return None
+
+
+def _visible_non_delivery_slots(
+    table,
+    template_slots: dict[tuple[str, ...], int],
+    delivery_count: int,
+) -> dict[tuple[str, ...], int]:
+    """
+    When delivery tracks fit the first row, place MOA / Team Allocation on row 2
+    (cells 3–4) so they appear directly below the delivery row instead of the
+    deep template slots (8 / 10) that sit near the footer.
+    """
+    n_cols = len(table.columns)
+    if delivery_count > n_cols:
+        return template_slots
+
+    placements: dict[tuple[str, ...], int] = {}
+    next_slot = delivery_count
+    for needles, _, delivery_only in INDEX_ENTRY_RULES:
+        if delivery_only:
+            continue
+        key = tuple(needles)
+        if key not in template_slots:
+            continue
+        while next_slot in template_slots.values():
+            next_slot += 1
+        placements[key] = next_slot
+        next_slot += 1
+    return placements
+
+
+def _index_slot_assignments_for_populated_week(
+    prs,
+    table,
+    populated_titles: set[str],
+) -> list[tuple[int, int, object]]:
+    """
+    Index placements for delivery tracks (compacted top cells) plus Matters of
+    Attention and Team Allocation (visible row when few tracks, else G10X slots).
+    """
+    template_tx = _default_index_tx_body(table)
+    if template_tx is None:
+        entries = _collect_active_index_entries(prs, table)
+        return [
+            (slot_idx, target_idx, tx_body)
+            for slot_idx, (target_idx, tx_body) in enumerate(entries)
+        ]
+
+    non_delivery_slots = _non_delivery_slots_from_template(table)
+    reserved_slots = set(non_delivery_slots.values())
+
+    sorted_titles = sorted(
+        populated_titles,
+        key=lambda title: find_slide_by_title(prs, title) or 10_000,
+    )
+    assignments: list[tuple[int, int, object]] = []
+    seen_targets: set[int] = set()
+    next_slot = 0
+
+    for title in sorted_titles:
+        target_idx = find_slide_by_title(prs, title)
+        if target_idx is None or target_idx in seen_targets:
+            continue
+        while next_slot in reserved_slots:
+            next_slot += 1
+        slot_idx = next_slot
+        seen_targets.add(target_idx)
+        next_slot += 1
+        tx_body = copy.deepcopy(template_tx)
+        _set_index_label_text(tx_body, title)
+        assignments.append((slot_idx, target_idx, tx_body))
+
+    visible_slots = _visible_non_delivery_slots(
+        table, non_delivery_slots, len(assignments)
+    )
+
+    for needles, search_title, delivery_only in INDEX_ENTRY_RULES:
+        if delivery_only:
+            continue
+        key = tuple(needles)
+        slot_idx = visible_slots.get(key) or non_delivery_slots.get(key)
+        if slot_idx is None:
+            continue
+        target_idx = _find_non_delivery_slide_index(prs, needles, search_title)
+        if target_idx is None or target_idx in seen_targets:
+            continue
+        tx_body = _find_index_cell_tx_body(table, needles)
+        if tx_body is None and template_tx is not None:
+            tx_body = copy.deepcopy(template_tx)
+            _set_index_label_text(tx_body, search_title)
+        if tx_body is None:
+            continue
+        seen_targets.add(target_idx)
+        assignments.append((slot_idx, target_idx, tx_body))
+
+    return assignments
+
+
 def _collect_active_index_entries(prs, table) -> list[tuple[int, object]]:
     """
     Index entries that still resolve to a slide in the deck, in template order.
@@ -3311,13 +3538,17 @@ def _collect_active_index_entries(prs, table) -> list[tuple[int, object]]:
     return entries
 
 
-def reflow_index_slide(prs) -> int:
+def reflow_index_slide(prs, populated_titles: set[str] | None = None) -> int:
     """
     Drop index rows for missing projects and compact remaining entries.
 
     Projects without a delivery slide (or other mapped slide) are removed entirely
     from the Index table — label and number — and surviving entries shift left/up
     with no empty placeholder cells.
+
+    When ``populated_titles`` is set (WSR JSON mode), index rows are rebuilt for
+    every populated delivery slide, including dynamically added team tracks.
+    Matters of Attention and Team Allocation keep their G10X template cell slots.
     """
     index_idx = _find_index_slide_index(prs)
     if index_idx is None:
@@ -3328,7 +3559,16 @@ def reflow_index_slide(prs) -> int:
     if table is None:
         return 0
 
-    active_entries = _collect_active_index_entries(prs, table)
+    if populated_titles:
+        assignments = _index_slot_assignments_for_populated_week(
+            prs, table, populated_titles
+        )
+    else:
+        active_entries = _collect_active_index_entries(prs, table)
+        assignments = [
+            (slot_idx, target_idx, tx_body)
+            for slot_idx, (target_idx, tx_body) in enumerate(active_entries)
+        ]
     slot_cells = _index_table_cells_row_major(table)
 
     for cell in slot_cells:
@@ -3336,7 +3576,7 @@ def reflow_index_slide(prs) -> int:
             _clear_index_cell_completely(cell)
 
     updated = 0
-    for slot_idx, (target_idx, tx_body) in enumerate(active_entries):
+    for slot_idx, target_idx, tx_body in assignments:
         if slot_idx >= len(slot_cells):
             break
         cell = slot_cells[slot_idx]
@@ -3347,13 +3587,13 @@ def reflow_index_slide(prs) -> int:
     return updated
 
 
-def sync_index_slide_numbers(prs) -> int:
+def sync_index_slide_numbers(prs, populated_titles: set[str] | None = None) -> int:
     """
     Reflow the Index slide: remove missing projects and sync numbers/hyperlinks.
 
     Call after ``finalize_slide_order()`` once unpopulated delivery slides are removed.
     """
-    return reflow_index_slide(prs)
+    return reflow_index_slide(prs, populated_titles)
 
 
 def main():
@@ -3374,7 +3614,7 @@ def main():
         using_json = True
         print(f"Loaded {len(slides_data)} slide(s) from {args.content}")
 
-    deck_path = prepare_deck_from_g10x()
+    deck_path = prepare_deck_from_g10x(G10X)
     prs = Presentation(deck_path)
     g10x = Presentation(G10X)
 
@@ -3383,6 +3623,10 @@ def main():
         raise RuntimeError("Cost Core Service slide not found in template")
     ref_slide = prs.slides[cost_idx]
     ref_title = next(s for s in prs.slides[cost_idx].shapes if s.shape_id == 2)
+
+    populated_titles = {raw["title"] for raw in slides_data.values()}
+    if using_json and populated_titles:
+        ensure_delivery_slides_for_titles(prs, populated_titles, ref_title)
 
     completed_hdr, completed_bullet = find_completed_templates()
     canonical_style_cell = get_canonical_style_cell(g10x)
@@ -3394,7 +3638,7 @@ def main():
     for _key, raw in slides_data.items():
         slide_idx = find_slide_by_title(prs, raw["title"])
         if slide_idx is None:
-            print(f"Warning: slide not found for {raw['title']}")
+            print(f"Warning: slide not found for {raw['title']} (skipped)")
             continue
         g10x_layout = get_g10x_layout_slide(g10x, raw["title"])
         section_tmpl = discover_section_templates(
@@ -3541,14 +3785,29 @@ def main():
         if removed:
             print(f"Removed {removed} unpopulated delivery-status slide(s)")
 
-    finalize_slide_order(prs)
+    service_titles = [raw["title"] for raw in slides_data.values()]
+    finalize_slide_order(prs, service_titles)
     cleanup_orphan_contd_slides(prs)
-    index_updates = sync_index_slide_numbers(prs)
+    index_updates = sync_index_slide_numbers(
+        prs,
+        populated_titles if using_json else None,
+    )
     if index_updates:
         print(
             f"Reflowed index slide: {index_updates} entr"
             f"{'y' if index_updates == 1 else 'ies'} (removed projects without content)"
         )
+        index_idx = _find_index_slide_index(prs)
+        if index_idx is not None:
+            table = _find_index_table(prs.slides[index_idx])
+            if table is not None:
+                labels = []
+                for j, cell in enumerate(_index_table_cells_row_major(table)):
+                    t = _cell_full_text(cell)
+                    if t:
+                        labels.append(f"[{j}] {t.replace(chr(10), ' / ')}")
+                if labels:
+                    print(f"Index entries: {' | '.join(labels)}")
 
     if wsr_start_date:
         if sync_cover_slide_wsr_date(prs, wsr_start_date):

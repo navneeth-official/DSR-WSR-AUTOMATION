@@ -44,6 +44,15 @@ class Settings:
     azure_openai_model: str = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o-mini")
     azure_openai_vision_model: str = os.getenv("AZURE_OPENAI_VISION_MODEL", "")
 
+    # Microsoft Entra app (personal OneDrive upload via Graph — delegated MSAL)
+    azure_client_id: str = os.getenv("AZURE_CLIENT_ID", "")
+    azure_tenant_id: str = os.getenv("AZURE_TENANT_ID", "")
+    azure_authority: str = os.getenv("AZURE_AUTHORITY", "")
+    onedrive_upload_folder: str = os.getenv("ONEDRIVE_UPLOAD_FOLDER", "WSR")
+    onedrive_upload_enabled: bool = os.getenv(
+        "ONEDRIVE_UPLOAD_ENABLED", ""
+    ).lower() in ("1", "true", "yes")
+
 
 @lru_cache
 def get_settings() -> Settings:

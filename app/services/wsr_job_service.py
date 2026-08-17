@@ -19,6 +19,7 @@ class WsrJob:
     job_id: str
     start_date: date
     end_date: date
+    template_id: str
     status: JobStatus = "queued"
     error: str | None = None
     result: dict[str, Any] | None = None
@@ -45,6 +46,7 @@ def start_wsr_job(
     *,
     start_date: date,
     end_date: date,
+    template_id: str,
     force: bool = False,
 ) -> WsrJob:
     """Queue WSR generation on a background thread."""
@@ -54,7 +56,12 @@ def start_wsr_job(
         existing = _jobs.get(job_id)
         if existing and existing.status in {"queued", "running"} and not force:
             return existing
-        job = WsrJob(job_id=job_id, start_date=start_date, end_date=end_date)
+        job = WsrJob(
+            job_id=job_id,
+            start_date=start_date,
+            end_date=end_date,
+            template_id=template_id,
+        )
         _jobs[job_id] = job
 
     def _run() -> None:
@@ -70,6 +77,7 @@ def start_wsr_job(
                 db,
                 start_date=start_date,
                 end_date=end_date,
+                template_id=job.template_id,
             )
             with _lock:
                 job.status = "completed"

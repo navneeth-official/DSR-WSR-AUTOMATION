@@ -6,22 +6,26 @@ PPT_SLIDE_TITLES: dict[str, str] = {
     "SUP": "Supplier Core Service",  # G10X layout alias in update_delivery_status.G10X_LAYOUT_BY_TITLE
     "SPUR": "Supplier Core Service",
     "PRC": "Pricing Core Service",
+    "PRICE": "Pricing Core Service",
     "WNF": "Wentworth",
     "LOC": "Location Core Service",
     "PHRM": "Pharmacy and Wellness",
     "GSS": "Global Sourcing Solution",
+    "PATRV": "Patronage Travel",
 }
 
-# Deck slide order (matches G10X template)
+# Deck slide order (matches G10X template); unknown keys sort after these.
 PPT_SLIDE_ORDER: list[str] = [
     "COST",
     "SUP",
     "SPUR",
     "PRC",
+    "PRICE",
     "WNF",
     "LOC",
     "PHRM",
     "GSS",
+    "PATRV",
 ]
 
 # Jira status (lowercase) -> highlights bucket

@@ -28,6 +28,7 @@ class DsrStoryRow(BaseModel):
     percent_complete: Decimal | None
     assignee: str | None
     reportee: str | None = Field(description="Reporter from Jira / Rovo payload")
+    comment: str | None = Field(default=None, description="Optional developer comment")
 
 
 class DsrStatusSummary(BaseModel):
@@ -52,6 +53,7 @@ class TrackListItem(BaseModel):
     project_id: int
     project_key: str
     project_name: str
+    is_active: bool = True
 
 
 class TeamTracksResponse(BaseModel):

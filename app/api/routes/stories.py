@@ -9,6 +9,7 @@ from app.schemas.jira_story import (
     JiraStoryListResponse,
     JiraStoryResponse,
     JiraStorySaveRequest,
+    StoryCommentRequest,
     TitleSuggestionsResponse,
 )
 from app.services.jira_story_service import JiraStoryService
@@ -76,6 +77,16 @@ def list_story_history(
 ) -> JiraStoryListResponse:
     """List all historical snapshots for one jira_key, newest first."""
     return JiraStoryService(db).list_story_history(jira_key)
+
+
+@router.post("/{jira_key}/comment", response_model=JiraStoryResponse, status_code=201)
+def add_story_comment(
+    jira_key: str,
+    body: StoryCommentRequest,
+    db: Session = Depends(get_db),
+) -> JiraStoryResponse:
+    """Add a developer comment as a new snapshot version for the story."""
+    return JiraStoryService(db).add_story_comment(jira_key, body.comment)
 
 
 @router.get("/track/{track_id}/dsr", response_model=JiraStoryListResponse)

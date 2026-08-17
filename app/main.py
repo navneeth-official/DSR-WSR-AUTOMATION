@@ -2,7 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.dsr import router as dsr_router
+from app.api.routes.employees import router as employees_router
 from app.api.routes.stories import router as stories_router
+from app.api.routes.tracks import router as tracks_router
 from app.api.routes.wsr import router as wsr_router
 
 app = FastAPI(
@@ -21,7 +23,9 @@ app.add_middleware(
 
 app.include_router(dsr_router)
 app.include_router(stories_router)
+app.include_router(employees_router)
 app.include_router(wsr_router)
+app.include_router(tracks_router)
 
 
 @app.get("/health")

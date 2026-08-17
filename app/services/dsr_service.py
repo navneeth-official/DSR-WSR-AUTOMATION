@@ -41,6 +41,7 @@ class DsrService:
                     project_id=project.project_id,
                     project_key=project.project_key,
                     project_name=project.project_name,
+                    is_active=project.is_active,
                 )
                 for project in projects
             ],
@@ -99,6 +100,7 @@ def _to_story_row(story: JiraStory) -> DsrStoryRow:
         percent_complete=story.completion,
         assignee=story.assignee,
         reportee=story.reporter,
+        comment=story.comment,
     )
 
 
